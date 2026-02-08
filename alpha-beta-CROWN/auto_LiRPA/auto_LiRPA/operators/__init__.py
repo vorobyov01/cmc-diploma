@@ -46,3 +46,9 @@ from .minmax import *
 from .convex_concave import *
 from .gelu import *
 from .tile import *
+# Tensor Parallelism support (experimental)
+try:
+    from .tensor_parallel import BoundLinearTP_Col, BoundLinearTP_Row
+except ImportError:
+    # Optional dependency
+    pass
