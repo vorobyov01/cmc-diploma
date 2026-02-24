@@ -31,10 +31,12 @@ from tp_model import SimpleTPModel, register_tp_custom_ops
 
 def run_worker(rank, world_size):
     """Worker function for distributed execution."""
-    # Initialize distributed
-    os.environ['MASTER_ADDR'] = '127.0.0.1'
-    os.environ['MASTER_PORT'] = '29500'
-    
+    # Only set MASTER_ADDR/PORT when not launched by torchrun (which sets them).
+    if 'MASTER_ADDR' not in os.environ:
+        os.environ['MASTER_ADDR'] = '127.0.0.1'
+    if 'MASTER_PORT' not in os.environ:
+        os.environ['MASTER_PORT'] = '29500'
+
     backend = 'nccl' if torch.cuda.is_available() else 'gloo'
     dist.init_process_group(
         backend=backend,
