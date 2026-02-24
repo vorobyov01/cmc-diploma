@@ -20,14 +20,13 @@ except RuntimeError:
 
 import torch
 import torch.distributed as dist
-import torch.nn as nn
-from torch.multiprocessing import Process
 
 # Add parent directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.perturbations import PerturbationLpNorm
+from tp_model import SimpleTPModel, register_tp_custom_ops
 
 
 def run_worker(rank, world_size):
@@ -53,20 +52,8 @@ def run_worker(rank, world_size):
     if rank == 0:
         print(f"Initialized distributed: world_size={world_size}, backend={backend}")
     
-    # Create a simple model (similar to toy.py example)
-    class SimpleModel(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.w1 = nn.Parameter(torch.tensor([[1., -1.], [2., -1.]]))
-            self.w2 = nn.Parameter(torch.tensor([[1., -1.]]))
-        
-        def forward(self, x):
-            z1 = x.matmul(self.w1.t())
-            hz1 = torch.nn.functional.relu(z1)
-            z2 = hz1.matmul(self.w2.t())
-            return z2
-    
-    model = SimpleModel().to(device)
+    register_tp_custom_ops()
+    model = SimpleTPModel(input_dim=2, hidden_dim=4, output_dim=1).to(device)
     
     # Create input
     x = torch.tensor([[1.0, 1.0]], device=device)
@@ -78,7 +65,7 @@ def run_worker(rank, world_size):
         print(f"Input bounds: [{lower.cpu()}, {upper.cpu()}]")
     
     try:
-        # Wrap with auto_LiRPA (standard, no TP for now)
+        # Wrap with auto_LiRPA + registered TP custom ops.
         lirpa_model = BoundedModule(
             model, 
             torch.empty_like(x), 
@@ -140,9 +127,8 @@ def main():
     
     if world_size == 1:
         # Single GPU/CPU mode for testing
-        print("Running in single-process mode (no TP)...")
-        print("This demonstrates the basic verification workflow.")
-        print("For full TP testing, use: torchrun --nproc_per_node=2 test_tp_verification.py\n")
+        print("Running in single-process TP mode (world_size=1)...")
+        print("For multi-process TP testing, use: torchrun --nproc_per_node=2 test_tp_torchrun.py\n")
         
         os.environ['MASTER_ADDR'] = '127.0.0.1'
         os.environ['MASTER_PORT'] = '29500'
@@ -150,20 +136,8 @@ def main():
         
         device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
         
-        # Simple model similar to toy.py
-        class SimpleModel(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.w1 = nn.Parameter(torch.tensor([[1., -1.], [2., -1.]]))
-                self.w2 = nn.Parameter(torch.tensor([[1., -1.]]))
-            
-            def forward(self, x):
-                z1 = x.matmul(self.w1.t())
-                hz1 = torch.nn.functional.relu(z1)
-                z2 = hz1.matmul(self.w2.t())
-                return z2
-        
-        model = SimpleModel().to(device)
+        register_tp_custom_ops()
+        model = SimpleTPModel(input_dim=2, hidden_dim=4, output_dim=1).to(device)
         x = torch.tensor([[1.0, 1.0]], device=device)
         lower = torch.tensor([[-1.0, -2.0]], device=device)
         upper = torch.tensor([[2.0, 1.0]], device=device)

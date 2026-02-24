@@ -6,6 +6,62 @@ import torch.nn as nn
 import torch.distributed as dist
 
 
+class TPLinearColOp(torch.autograd.Function):
+    """Column-parallel linear op with ONNX symbolic for auto_LiRPA custom op mapping."""
+
+    @staticmethod
+    def forward(ctx, x, weight, bias):
+        ctx.save_for_backward(x, weight, bias)
+        return torch.nn.functional.linear(x, weight, bias)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        x, weight, bias = ctx.saved_tensors
+        grad_x = grad_output.matmul(weight)
+        grad_weight = grad_output.transpose(-1, -2).matmul(x)
+        grad_bias = grad_output.sum(dim=0) if bias is not None else None
+        return grad_x, grad_weight, grad_bias
+
+    @staticmethod
+    def symbolic(g, x, weight, bias):
+        return g.op("customOp::TPLinearCol", x, weight, bias)
+
+
+class TPLinearRowOp(torch.autograd.Function):
+    """Row-parallel linear op with local matmul and cross-rank AllReduce in forward."""
+
+    @staticmethod
+    def forward(ctx, x, weight, bias):
+        ctx.save_for_backward(x, weight, bias)
+        out = torch.nn.functional.linear(x, weight, None)
+        if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+            dist.all_reduce(out, op=dist.ReduceOp.SUM, async_op=False)
+        if bias is not None:
+            out = out + bias
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        x, weight, bias = ctx.saved_tensors
+        grad_x = grad_output.matmul(weight)
+        grad_weight = grad_output.transpose(-1, -2).matmul(x)
+        grad_bias = grad_output.sum(dim=0) if bias is not None else None
+        return grad_x, grad_weight, grad_bias
+
+    @staticmethod
+    def symbolic(g, x, weight, bias):
+        return g.op("customOp::TPLinearRow", x, weight, bias)
+
+
+def register_tp_custom_ops():
+    """Register TP custom ops so BoundedModule maps them to TP-aware bound classes."""
+    from auto_LiRPA import register_custom_op
+    from auto_LiRPA.operators.tensor_parallel import BoundLinearTP_Col, BoundLinearTP_Row
+
+    register_custom_op("customOp::TPLinearCol", BoundLinearTP_Col)
+    register_custom_op("customOp::TPLinearRow", BoundLinearTP_Row)
+
+
 class ColumnParallelLinear(nn.Module):
     """
     Column Parallel Linear layer - splits weights along output dimension.
@@ -32,18 +88,8 @@ class ColumnParallelLinear(nn.Module):
             self.register_parameter('bias', None)
     
     def forward(self, x):
-        # Local computation
-        output = x.matmul(self.weight.t())
-        if self.bias is not None:
-            output = output + self.bias
-        
-        # AllGather to get full output (for forward pass)
-        if dist.is_initialized() and self.world_size > 1:
-            output_list = [torch.zeros_like(output) for _ in range(self.world_size)]
-            dist.all_gather(output_list, output)
-            output = torch.cat(output_list, dim=-1)
-        
-        return output
+        # Keep column-parallel activations sharded to avoid extra communication.
+        return TPLinearColOp.apply(x, self.weight, self.bias)
 
 
 class RowParallelLinear(nn.Module):
@@ -73,24 +119,12 @@ class RowParallelLinear(nn.Module):
             self.register_parameter('bias', None)
     
     def forward(self, x):
-        # Split input along last dimension
-        if dist.is_initialized() and self.world_size > 1:
-            # x should already be split, but we ensure it
+        # If full activations are provided, take this rank shard.
+        if dist.is_initialized() and self.world_size > 1 and x.size(-1) == self.in_features:
             local_x = x[..., self.rank * self.local_in_features:(self.rank + 1) * self.local_in_features]
         else:
             local_x = x
-        
-        # Local computation
-        output = local_x.matmul(self.weight.t())
-        
-        # AllReduce to combine partial results
-        if dist.is_initialized() and self.world_size > 1:
-            dist.all_reduce(output, op=dist.ReduceOp.SUM)
-        
-        if self.bias is not None:
-            output = output + self.bias
-        
-        return output
+        return TPLinearRowOp.apply(local_x, self.weight, self.bias)
 
 
 class SimpleTPModel(nn.Module):

@@ -25,8 +25,14 @@ class BoundLinearTP_Col(BoundLinear):
     
     def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
-        # Check if distributed is initialized (optional for first version)
-        if dist.is_initialized():
+        # For custom TP ops, weights are provided in (out_features, in_features).
+        # BoundLinear expects transB=1 for this layout.
+        if attr is None or 'transB' not in attr:
+            self.transB = 1
+        self._refresh_dist_state()
+
+    def _refresh_dist_state(self):
+        if dist.is_available() and dist.is_initialized():
             self.world_size = dist.get_world_size()
             self.rank = dist.get_rank()
             self.use_tp = True
@@ -34,6 +40,19 @@ class BoundLinearTP_Col(BoundLinear):
             self.use_tp = False
             self.world_size = 1
             self.rank = 0
+
+    @staticmethod
+    def _all_reduce_inplace(value):
+        if isinstance(value, torch.Tensor):
+            dist.all_reduce(value, op=dist.ReduceOp.SUM, async_op=False)
+        elif isinstance(value, (tuple, list)):
+            for item in value:
+                if isinstance(item, torch.Tensor):
+                    dist.all_reduce(item, op=dist.ReduceOp.SUM, async_op=False)
+
+    def forward(self, x, w, b=None):
+        self._refresh_dist_state()
+        return super().forward(x, w, b)
         
     def bound_backward(self, last_lA, last_uA, *x, start_node=None,
                        reduce_bias=True, **kwargs):
@@ -49,6 +68,8 @@ class BoundLinearTP_Col(BoundLinear):
         result = super().bound_backward(last_lA, last_uA, *x, start_node=start_node,
                                        reduce_bias=reduce_bias, **kwargs)
         
+        self._refresh_dist_state()
+
         # If TP is enabled, perform AllReduce on A matrices and biases
         if self.use_tp and self.world_size > 1:
             # Extract A matrices for input (x[0])
@@ -60,10 +81,8 @@ class BoundLinearTP_Col(BoundLinear):
                 dist.all_reduce(lA_x, op=dist.ReduceOp.SUM, async_op=False)
             if uA_x is not None and isinstance(uA_x, torch.Tensor):
                 dist.all_reduce(uA_x, op=dist.ReduceOp.SUM, async_op=False)
-            if isinstance(lbias, torch.Tensor):
-                dist.all_reduce(lbias, op=dist.ReduceOp.SUM, async_op=False)
-            if isinstance(ubias, torch.Tensor):
-                dist.all_reduce(ubias, op=dist.ReduceOp.SUM, async_op=False)
+            self._all_reduce_inplace(lbias)
+            self._all_reduce_inplace(ubias)
         
         return result
 
@@ -80,7 +99,12 @@ class BoundLinearTP_Row(BoundLinear):
     
     def __init__(self, attr=None, inputs=None, output_index=0, options=None):
         super().__init__(attr, inputs, output_index, options)
-        if dist.is_initialized():
+        if attr is None or 'transB' not in attr:
+            self.transB = 1
+        self._refresh_dist_state()
+
+    def _refresh_dist_state(self):
+        if dist.is_available() and dist.is_initialized():
             self.world_size = dist.get_world_size()
             self.rank = dist.get_rank()
             self.use_tp = True
@@ -88,6 +112,23 @@ class BoundLinearTP_Row(BoundLinear):
             self.use_tp = False
             self.world_size = 1
             self.rank = 0
+
+    def forward(self, x, w, b=None):
+        self._refresh_dist_state()
+        output = super().forward(x, w, b)
+        if self.use_tp and self.world_size > 1 and isinstance(output, torch.Tensor):
+            dist.all_reduce(output, op=dist.ReduceOp.SUM, async_op=False)
+        return output
+
+    def interval_propagate(self, *v, C=None, w=None):
+        self._refresh_dist_state()
+        lower, upper = super().interval_propagate(*v, C=C, w=w)
+        if self.use_tp and self.world_size > 1:
+            if isinstance(lower, torch.Tensor):
+                dist.all_reduce(lower, op=dist.ReduceOp.SUM, async_op=False)
+            if isinstance(upper, torch.Tensor):
+                dist.all_reduce(upper, op=dist.ReduceOp.SUM, async_op=False)
+        return lower, upper
         
     def bound_backward(self, last_lA, last_uA, *x, start_node=None,
                        reduce_bias=True, **kwargs):
@@ -102,8 +143,9 @@ class BoundLinearTP_Row(BoundLinear):
         # For Row Parallel, the incoming A matrices are replicated
         # We just compute locally and the result is automatically sharded
         # No AllReduce needed!
+        self._refresh_dist_state()
         result = super().bound_backward(last_lA, last_uA, *x, start_node=start_node,
-                                       reduce_bias=reduce_bias, **kwargs)
+                                        reduce_bias=reduce_bias, **kwargs)
         
         # The result A matrices are already correctly sharded
         # No communication needed for Row Parallel layers

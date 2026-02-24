@@ -8,13 +8,13 @@ import os
 import sys
 import torch
 import torch.distributed as dist
-import torch.nn as nn
 
 # Add parent directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.perturbations import PerturbationLpNorm
+from tp_model import SimpleTPModel, register_tp_custom_ops
 
 
 def main():
@@ -39,20 +39,8 @@ def main():
     if rank == 0:
         print(f"Initialized distributed: world_size={world_size}, backend={backend}")
     
-    # Create a simple model (similar to toy.py example)
-    class SimpleModel(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.w1 = nn.Parameter(torch.tensor([[1., -1.], [2., -1.]]))
-            self.w2 = nn.Parameter(torch.tensor([[1., -1.]]))
-        
-        def forward(self, x):
-            z1 = x.matmul(self.w1.t())
-            hz1 = torch.nn.functional.relu(z1)
-            z2 = hz1.matmul(self.w2.t())
-            return z2
-    
-    model = SimpleModel().to(device)
+    register_tp_custom_ops()
+    model = SimpleTPModel(input_dim=2, hidden_dim=4, output_dim=1).to(device)
     
     # Create input
     x = torch.tensor([[1.0, 1.0]], device=device)
@@ -64,7 +52,7 @@ def main():
         print(f"Input bounds: [{lower.cpu()}, {upper.cpu()}]")
     
     try:
-        # Wrap with auto_LiRPA
+        # Wrap with auto_LiRPA + registered TP custom ops.
         lirpa_model = BoundedModule(
             model, 
             torch.empty_like(x), 
