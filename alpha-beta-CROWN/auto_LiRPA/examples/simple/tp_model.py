@@ -34,7 +34,7 @@ class TPLinearRowOp(torch.autograd.Function):
     def forward(ctx, x, weight, bias):
         ctx.save_for_backward(x, weight, bias)
         out = torch.nn.functional.linear(x, weight, None)
-        if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+        if not torch.jit.is_tracing() and dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
             dist.all_reduce(out, op=dist.ReduceOp.SUM, async_op=False)
         if bias is not None:
             out = out + bias
@@ -120,7 +120,7 @@ class RowParallelLinear(nn.Module):
     
     def forward(self, x):
         # If full activations are provided, take this rank shard.
-        if dist.is_initialized() and self.world_size > 1 and x.size(-1) == self.in_features:
+        if not torch.jit.is_tracing() and dist.is_initialized() and self.world_size > 1 and x.size(-1) == self.in_features:
             local_x = x[..., self.rank * self.local_in_features:(self.rank + 1) * self.local_in_features]
         else:
             local_x = x
