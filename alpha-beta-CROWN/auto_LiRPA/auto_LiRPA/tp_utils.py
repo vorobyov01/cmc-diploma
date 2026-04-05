@@ -71,9 +71,12 @@ def tp_shard_bounded_module(
 ) -> List[str]:
     """Replace BoundLinear nodes with TP-sharded equivalents in-place.
 
-    Uses alternating Column/Row parallelism (Megatron-LM pattern):
-      - Odd layers (1st, 3rd, ...): ColumnParallel — shard output dim
-      - Even layers (2nd, 4th, ...): RowParallel — shard input dim
+    Uses paired Column/Row parallelism (Megatron-LM pattern):
+      - Pairs consecutive Linear layers as (Col, Row)
+      - Col: shard output dim; Row: shard input dim
+      - The last layer is left un-sharded if there's an odd number
+        (output layer is typically small and sharding it would break
+        the C matrix / output specification)
 
     Args:
         model: A BoundedModule built from a regular (non-TP) model.
@@ -94,40 +97,41 @@ def tp_shard_bounded_module(
     if not linears:
         return []
 
+    # Pair consecutive linears as (Col, Row). Leave last un-sharded if odd.
+    n_pairs = len(linears) // 2
     sharded_names: List[str] = []
 
-    for idx, node in enumerate(linears):
-        is_col = (idx % 2 == 0)
+    for pair_idx in range(n_pairs):
+        col_node = linears[pair_idx * 2]
+        row_node = linears[pair_idx * 2 + 1]
 
-        weight_node = node.inputs[1]
-        assert isinstance(weight_node, BoundParams), (
-            f"Expected BoundParams for weight of {node.name}, "
-            f"got {type(weight_node).__name__}")
-        bias_node = node.inputs[2] if len(node.inputs) > 2 else None
+        # --- Column Parallel ---
+        col_weight = col_node.inputs[1]
+        assert isinstance(col_weight, BoundParams), (
+            f"Expected BoundParams for weight of {col_node.name}, "
+            f"got {type(col_weight).__name__}")
+        col_bias = col_node.inputs[2] if len(col_node.inputs) > 2 else None
 
-        if is_col:
-            # Column Parallel: shard along output features.
-            # transB=1 → weight shape [out, in] → shard dim 0
-            # transB=0 → weight shape [in, out] → shard dim 1
-            shard_dim = 0 if node.transB else 1
-            _shard_param(weight_node, shard_dim, rank, world_size)
+        shard_dim = 0 if col_node.transB else 1
+        _shard_param(col_weight, shard_dim, rank, world_size)
+        if col_bias is not None and isinstance(col_bias, BoundParams):
+            _shard_param(col_bias, 0, rank, world_size)
 
-            if bias_node is not None and isinstance(bias_node, BoundParams):
-                _shard_param(bias_node, 0, rank, world_size)
+        col_node.__class__ = BoundLinearTP_Col
+        col_node._refresh_dist_state()
+        sharded_names.append(col_node.name)
 
-            node.__class__ = BoundLinearTP_Col
-        else:
-            # Row Parallel: shard along input features.
-            # transB=1 → weight shape [out, in] → shard dim 1
-            # transB=0 → weight shape [in, out] → shard dim 0
-            shard_dim = 1 if node.transB else 0
-            _shard_param(weight_node, shard_dim, rank, world_size)
+        # --- Row Parallel ---
+        row_weight = row_node.inputs[1]
+        assert isinstance(row_weight, BoundParams), (
+            f"Expected BoundParams for weight of {row_node.name}, "
+            f"got {type(row_weight).__name__}")
 
-            # Row parallel: bias stays full (AllReduce aggregates partial sums)
+        shard_dim = 1 if row_node.transB else 0
+        _shard_param(row_weight, shard_dim, rank, world_size)
 
-            node.__class__ = BoundLinearTP_Row
-
-        node._refresh_dist_state()
-        sharded_names.append(node.name)
+        row_node.__class__ = BoundLinearTP_Row
+        row_node._refresh_dist_state()
+        sharded_names.append(row_node.name)
 
     return sharded_names

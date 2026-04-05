@@ -143,12 +143,19 @@ def test_shard_shapes_3layer():
     assert len(linears) == 3, f"Expected 3 linears, got {len(linears)}"
 
     sharded = tp_shard_bounded_module(lirpa, world_size=2, rank=0)
-    assert len(sharded) == 3
+    # Only 2 of 3 are sharded (last one left un-sharded for output correctness)
+    assert len(sharded) == 2, f"Expected 2 sharded, got {len(sharded)}"
 
     types = [type(lirpa[name]).__name__ for name in sharded]
-    print(f"  Types: {types}")
-    assert types == ["BoundLinearTP_Col", "BoundLinearTP_Row", "BoundLinearTP_Col"], \
-        f"Expected Col/Row/Col, got {types}"
+    print(f"  Sharded types: {types}")
+    assert types == ["BoundLinearTP_Col", "BoundLinearTP_Row"], \
+        f"Expected Col/Row, got {types}"
+
+    # Verify the last linear is still regular BoundLinear
+    last_linear = linears[-1]
+    assert type(last_linear) is BoundLinear, \
+        f"Last linear should be un-sharded BoundLinear, got {type(last_linear).__name__}"
+    print(f"  Last linear ({last_linear.name}) is un-sharded: OK")
     print("  PASSED")
 
 
