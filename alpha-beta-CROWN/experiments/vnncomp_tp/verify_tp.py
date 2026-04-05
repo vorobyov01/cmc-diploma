@@ -14,32 +14,13 @@ from auto_LiRPA.perturbations import PerturbationLpNorm
 from auto_LiRPA.tp_utils import tp_shard_bounded_module
 
 
-def main():
-    rank = int(os.environ.get("LOCAL_RANK", "0"))
-    ws = int(os.environ.get("WORLD_SIZE", "1"))
-    dist.init_process_group("nccl", rank=rank, world_size=ws)
-    dev = torch.device(f"cuda:{rank}")
-    torch.cuda.set_device(dev)
-
-    torch.manual_seed(42)
-
-    model = nn.Sequential(
-        nn.Flatten(),
-        nn.Linear(784, 256),
-        nn.ReLU(),
-        nn.Linear(256, 256),
-        nn.ReLU(),
-        nn.Linear(256, 10),
-    )
-    model.to(dev).eval()
-
-    x = torch.randn(1, 1, 28, 28, device=dev).clamp(0, 1)
-    eps = 0.02
+def verify_model(model, x, eps, dev, rank, ws, label=""):
+    """Run single-GPU vs TP=N comparison for a given model and input."""
     x_L = (x - eps).clamp(0, 1)
     x_U = (x + eps).clamp(0, 1)
+    dummy = torch.empty_like(x)
 
     # --- Single GPU (reference, no TP) ---
-    dummy = torch.empty_like(x)
     lirpa_ref = BoundedModule(copy.deepcopy(model), dummy, device=dev)
     ptb_ref = PerturbationLpNorm(norm=float("inf"), x_L=x_L.clone(), x_U=x_U.clone())
     bx_ref = BoundedTensor(x.clone(), ptb_ref)
@@ -56,35 +37,99 @@ def main():
     lb_diff = (lb_ref - lb_tp).abs().max().item()
     ub_diff = (ub_ref - ub_tp).abs().max().item()
 
-    if rank == 0:
-        print(f"Reference lb: {lb_ref.detach().cpu().tolist()}")
-        print(f"TP={ws}    lb: {lb_tp.detach().cpu().tolist()}")
-        print(f"Reference ub: {ub_ref.detach().cpu().tolist()}")
-        print(f"TP={ws}    ub: {ub_tp.detach().cpu().tolist()}")
-        print(f"Max |lb_diff|: {lb_diff:.8f}")
-        print(f"Max |ub_diff|: {ub_diff:.8f}")
-
-        tol = 1e-4
-        if lb_diff < tol and ub_diff < tol:
-            print(f"PASS: bounds match within tolerance {tol}")
-        else:
-            print(f"FAIL: bounds differ beyond tolerance {tol}")
-
-    # Also check rank consistency
+    # Cross-rank consistency
     lb_tp_gathered = [torch.zeros_like(lb_tp) for _ in range(ws)]
     ub_tp_gathered = [torch.zeros_like(ub_tp) for _ in range(ws)]
     dist.all_gather(lb_tp_gathered, lb_tp)
     dist.all_gather(ub_tp_gathered, ub_tp)
 
+    tol = 1e-4
+    pass_accuracy = lb_diff < tol and ub_diff < tol
+
     if rank == 0:
-        rank_lb_diff = (lb_tp_gathered[0] - lb_tp_gathered[1]).abs().max().item()
-        rank_ub_diff = (ub_tp_gathered[0] - ub_tp_gathered[1]).abs().max().item()
-        print(f"Cross-rank |lb_diff|: {rank_lb_diff:.8f}")
-        print(f"Cross-rank |ub_diff|: {rank_ub_diff:.8f}")
-        if rank_lb_diff < 1e-6 and rank_ub_diff < 1e-6:
-            print("PASS: ranks produce identical bounds")
-        else:
-            print("FAIL: ranks produce different bounds")
+        rank_lb_diff = max(
+            (lb_tp_gathered[i] - lb_tp_gathered[j]).abs().max().item()
+            for i in range(ws) for j in range(i + 1, ws)
+        )
+        rank_ub_diff = max(
+            (ub_tp_gathered[i] - ub_tp_gathered[j]).abs().max().item()
+            for i in range(ws) for j in range(i + 1, ws)
+        )
+        pass_ranks = rank_lb_diff < 1e-6 and rank_ub_diff < 1e-6
+
+        status = "PASS" if (pass_accuracy and pass_ranks) else "FAIL"
+        print(f"[{status}] {label}: "
+              f"|lb_diff|={lb_diff:.2e}, |ub_diff|={ub_diff:.2e}, "
+              f"cross-rank lb={rank_lb_diff:.2e}, ub={rank_ub_diff:.2e}")
+        if not pass_accuracy:
+            print(f"  ref lb: {lb_ref.detach().cpu().flatten()[:5].tolist()} ...")
+            print(f"  tp  lb: {lb_tp.detach().cpu().flatten()[:5].tolist()} ...")
+        return pass_accuracy and pass_ranks
+    return True
+
+
+def main():
+    rank = int(os.environ.get("LOCAL_RANK", "0"))
+    ws = int(os.environ.get("WORLD_SIZE", "1"))
+    dist.init_process_group("nccl", rank=rank, world_size=ws)
+    dev = torch.device(f"cuda:{rank}")
+    torch.cuda.set_device(dev)
+
+    torch.manual_seed(42)
+    all_pass = True
+
+    # Test 1: PyTorch MLP 256x2
+    model_2layer = nn.Sequential(
+        nn.Flatten(), nn.Linear(784, 256), nn.ReLU(),
+        nn.Linear(256, 256), nn.ReLU(), nn.Linear(256, 10),
+    ).to(dev).eval()
+    x = torch.randn(1, 1, 28, 28, device=dev).clamp(0, 1)
+    ok = verify_model(model_2layer, x, eps=0.02, dev=dev, rank=rank, ws=ws,
+                       label="PyTorch 256x2")
+    all_pass = all_pass and ok
+
+    # Test 2: PyTorch MLP 256x4
+    model_4layer = nn.Sequential(
+        nn.Flatten(),
+        nn.Linear(784, 256), nn.ReLU(),
+        nn.Linear(256, 256), nn.ReLU(),
+        nn.Linear(256, 256), nn.ReLU(),
+        nn.Linear(256, 256), nn.ReLU(),
+        nn.Linear(256, 10),
+    ).to(dev).eval()
+    ok = verify_model(model_4layer, x, eps=0.02, dev=dev, rank=rank, ws=ws,
+                       label="PyTorch 256x4")
+    all_pass = all_pass and ok
+
+    # Test 3-5: ONNX models from VNN-COMP
+    onnx_models = [
+        ("models/mnist-net_256x2.onnx", "ONNX 256x2"),
+        ("models/mnist-net_256x4.onnx", "ONNX 256x4"),
+        ("models/mnist-net_256x6.onnx", "ONNX 256x6"),
+    ]
+    for onnx_path, label in onnx_models:
+        if not os.path.exists(onnx_path):
+            if rank == 0:
+                print(f"[SKIP] {label}: {onnx_path} not found")
+            continue
+        try:
+            import onnx
+            from onnx2pytorch import ConvertModel
+            onnx_model = onnx.load(onnx_path)
+            model_onnx = ConvertModel(onnx_model, experimental=True)
+            model_onnx.eval().to(dev)
+            x_onnx = torch.randn(1, 784, 1, device=dev).clamp(0, 1)
+            ok = verify_model(model_onnx, x_onnx, eps=0.02, dev=dev, rank=rank,
+                              ws=ws, label=label)
+            all_pass = all_pass and ok
+        except Exception as e:
+            if rank == 0:
+                print(f"[ERROR] {label}: {e}")
+            all_pass = False
+
+    if rank == 0:
+        print(f"\n{'='*50}")
+        print(f"Overall: {'ALL PASS' if all_pass else 'SOME FAILURES'}")
 
     dist.barrier()
     dist.destroy_process_group()
