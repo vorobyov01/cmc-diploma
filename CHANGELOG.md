@@ -1,5 +1,35 @@
 # Changelog
 
+## 2026-04-05 — Исправление OOM и contiguous-ошибки в TP bound propagation
+
+### Контекст
+
+При запуске TP-эксперимента (`torchrun --nproc_per_node=2 oom_tp_experiment.py --mode tp --method CROWN`) возникали две ошибки, из-за которых TP-режим вообще не работал, тогда как single GPU проходил успешно.
+
+### Ошибка 1: `ValueError: Tensors must be contiguous`
+
+**Файл:** `auto_LiRPA/operators/tensor_parallel.py`
+
+**Симптом:** NCCL `all_reduce` падал с `ValueError: Tensors must be contiguous` в `BoundLinearTP_Col.bound_backward`.
+
+**Причина:** Тензоры `lA_x`/`uA_x`, возвращаемые из `BoundLinear.bound_backward`, могут быть non-contiguous views (результат matmul, transpose и т.д.). NCCL `all_reduce` требует contiguous-тензоры.
+
+**Решение:**
+- Добавлен `.contiguous()` перед каждым `dist.all_reduce` в `BoundLinearTP_Col.bound_backward`
+- Хелпер `_all_reduce_inplace` заменён на `_contiguous_all_reduce` — возвращает значение (не in-place), корректно обрабатывает non-contiguous тензоры, включая вложенные tuple/list
+- Аналогичные `.contiguous()` добавлены превентивно в `BoundLinearTP_Row.forward` и `interval_propagate`
+- Структура `result` перестроена для корректного обновления после contiguous-копирования
+
+### Ошибка 2: OOM 4096 GiB при вычислении intermediate bounds
+
+**Файл:** `auto_LiRPA/interval_bound.py`
+
+**Симптом:** `CUDA out of memory. Tried to allocate 4096.00 GiB` — при том, что single GPU (без TP) проходил за 26.8 GB.
+
+**Причина:** Функция `check_IBP_first_linear` использует точную проверку типа `type(node) == BoundLinear`. Для `BoundLinearTP_Col` (подкласс `BoundLinear`) эта проверка возвращала `False`, из-за чего вместо дешёвого IBP (O(hidden × input) памяти) для intermediate bounds использовался CROWN backward. Это приводило к попытке аллоцировать A-матрицу размера (batch=2048, hidden/2=131072, input=4096) = 4096 GiB.
+
+**Решение:** Заменён `type(node) == BoundLinear` на `isinstance(node, BoundLinear)`, что корректно распознаёт TP-подклассы. IBP для первого линейного слоя безопасен для TP: каждый GPU считает bounds для своего шарда hidden dimension через унаследованный `interval_propagate`.
+
 ## 2026-03-08 — Добавлен эксперимент OOM (single GPU) vs TP=2
 
 ### Что добавлено

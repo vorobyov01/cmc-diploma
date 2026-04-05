@@ -18,7 +18,7 @@
 
 Подключение:
 ```bash
-ssh axuhl45x3r7suq-64411299@ssh.runpod.io -i /Users/svorobyov/Documents/cmc_mmp/vastai
+ssh awmfmmsr5lyv1r-6441173c@ssh.runpod.io -i /Users/svorobyov/Documents/cmc_mmp/vastai
 ```
 
 ## Полезные команды
@@ -27,7 +27,7 @@ ssh axuhl45x3r7suq-64411299@ssh.runpod.io -i /Users/svorobyov/Documents/cmc_mmp/
 
 ```bash
 # Подключение
-ssh axuhl45x3r7suq-64411299@ssh.runpod.io -i /Users/svorobyov/Documents/cmc_mmp/vastai
+ssh awmfmmsr5lyv1r-6441173c@ssh.runpod.io -i /Users/svorobyov/Documents/cmc_mmp/vastai
 
 # Pull и активация окружения
 cd /root/cmc-diploma && git pull && source .venv/bin/activate && cd alpha-beta-CROWN/auto_LiRPA
@@ -43,25 +43,33 @@ torchrun --nproc_per_node=2 --master_port=29510 examples/simple/test_tp_verifica
 killall -9 python3 torchrun 2>/dev/null
 ```
 
-### Эксперимент OOM (1 GPU) vs TP=2
+### Эксперимент CROWN: OOM (1 GPU) vs TP=2
 
 ```bash
-# Подключение + окружение
-ssh axuhl45x3r7suq-64411299@ssh.runpod.io -i /Users/svorobyov/Documents/cmc_mmp/vastai
-cd /root/cmc-diploma && git pull && source .venv/bin/activate && cd alpha-beta-CROWN/auto_LiRPA
+cd /root/cmc-diploma && git pull && source .venv/bin/activate
+cd alpha-beta-CROWN/experiments/crown
 
-# 1) Попытка выбить OOM на одной GPU (single, dense модель)
-python3 examples/simple/oom_tp_experiment.py \
-  --mode single --method CROWN \
-  --input-dim 4096 --hidden-dim 262144 --batch-size 2048
+# 1) Single GPU
+python run.py --mode single --input-dim 4096 --hidden-dim 262144 --batch-size 2048
 
-# 2) Те же параметры, но TP=2 (ожидается прохождение без OOM)
-torchrun --nproc_per_node=2 examples/simple/oom_tp_experiment.py \
-  --mode tp --method CROWN \
-  --input-dim 4096 --hidden-dim 262144 --batch-size 2048
+# 2) TP=2
+torchrun --nproc_per_node=2 run.py --mode tp --input-dim 4096 --hidden-dim 262144 --batch-size 2048
+```
 
-# Если single не дал OOM — увеличивать hidden_dim / batch_size
-# Если TP=2 тоже падает — уменьшать batch_size (например, 1536, 1024)
+### Эксперимент α-CROWN: численное сравнение single vs TP
+
+```bash
+cd /root/cmc-diploma && git pull && source .venv/bin/activate
+cd alpha-beta-CROWN/experiments/alpha_crown
+
+# 1) Single GPU — сохранить reference (веса + bounds + входы)
+python run.py --mode single --method alpha-CROWN --save ref.pt
+
+# 2) TP=1 — проверка корректности (bounds должны совпасть с reference)
+torchrun --nproc_per_node=1 run.py --mode tp --method alpha-CROWN --compare ref.pt
+
+# 3) TP=2 — те же веса, но шардинг на 2 GPU
+torchrun --nproc_per_node=2 run.py --mode tp --method alpha-CROWN --compare ref.pt
 ```
 
 ### Отладка NCCL
@@ -81,13 +89,15 @@ NCCL_TIMEOUT=30 torchrun --nproc_per_node=2 examples/simple/test_tp_verification
 
 | Файл | Описание |
 |------|----------|
-| `examples/simple/tp_model.py` | TP-модель (ColumnParallel, RowParallel, ONNX symbolic) |
-| `examples/simple/test_tp_verification.py` | Тест IBP + CROWN на 2 GPU |
-| `examples/simple/oom_tp_experiment.py` | Эксперимент OOM на 1 GPU и сравнение с TP=2 |
-| `auto_LiRPA/operators/tensor_parallel.py` | BoundLinearTP_Col/Row — bound propagation |
-| `auto_LiRPA/bound_general.py` | BoundedModule.__init__ (JIT trace + forward) |
-| `auto_LiRPA/parse_graph.py:206` | `torch.jit._get_trace_graph` вызов |
+| `experiments/tp_model.py` | Общий модуль: TP-модель, dense-модель, copy weights |
+| `experiments/crown/run.py` | Эксперимент CROWN: OOM single vs TP memory |
+| `experiments/alpha_crown/run.py` | Эксперимент α-CROWN: численное сравнение bounds |
+| `auto_LiRPA/auto_LiRPA/operators/tensor_parallel.py` | BoundLinearTP_Col/Row + DifferentiableAllReduce |
+| `auto_LiRPA/auto_LiRPA/interval_bound.py:222` | isinstance fix для IBP first linear |
+| `auto_LiRPA/auto_LiRPA/bound_general.py` | BoundedModule.__init__ (JIT trace + forward) |
 
 ## TODO
-1. Поставить эксперимент с Tensor Parallel верификацией нейронных сетей
-2. Зафиксировать результаты OOM (single) vs успех TP=2 в тексте диплома
+1. ✅ Эксперимент CROWN: single GPU vs TP=2 (OOM / memory)
+2. ✅ Зафиксировать результаты в тексте диплома
+3. Эксперимент α-CROWN: верификация корректности (TP=1 vs single) и TP=2
+4. β-CROWN + BaB интеграция (future work)
