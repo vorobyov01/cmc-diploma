@@ -77,6 +77,12 @@ class BoundParams(BoundInput):
 
     def forward(self):
         param = self.param
+        ws = getattr(self, '_fsdp_world_size', 0)
+        if ws > 1:
+            import torch.distributed as dist
+            parts = [torch.empty_like(param) for _ in range(ws)]
+            dist.all_gather(parts, param.data)
+            param = torch.cat(parts, dim=self._fsdp_shard_dim)
         if self.auto_requires_grad:
             param = param.requires_grad_(self.training)
         return param
