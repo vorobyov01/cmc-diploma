@@ -14,4 +14,4 @@ bab:
   timeout: 10
 general:
   device: cuda
-  mode: incomplete
+  complete_verifier: skip
