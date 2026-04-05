@@ -42,13 +42,20 @@ class BoundLinearTP_Col(BoundLinear):
             self.rank = 0
 
     @staticmethod
-    def _all_reduce_inplace(value):
+    def _contiguous_all_reduce(value):
+        """AllReduce that handles non-contiguous tensors (e.g. from matmul views)."""
         if isinstance(value, torch.Tensor):
+            value = value.contiguous()
             dist.all_reduce(value, op=dist.ReduceOp.SUM, async_op=False)
         elif isinstance(value, (tuple, list)):
+            items = []
             for item in value:
                 if isinstance(item, torch.Tensor):
+                    item = item.contiguous()
                     dist.all_reduce(item, op=dist.ReduceOp.SUM, async_op=False)
+                items.append(item)
+            value = type(value)(items)
+        return value
 
     def forward(self, x, w, b=None):
         self._refresh_dist_state()
@@ -70,19 +77,21 @@ class BoundLinearTP_Col(BoundLinear):
 
         self._refresh_dist_state()
 
-        # If TP is enabled, perform AllReduce on A matrices and biases
         if self.use_tp and self.world_size > 1:
-            # Extract A matrices for input (x[0])
             lA_x, uA_x = result[0][0]
             lbias, ubias = result[1], result[2]
 
-            # AllReduce to combine partial results from all GPUs
             if lA_x is not None and isinstance(lA_x, torch.Tensor):
+                lA_x = lA_x.contiguous()
                 dist.all_reduce(lA_x, op=dist.ReduceOp.SUM, async_op=False)
             if uA_x is not None and isinstance(uA_x, torch.Tensor):
+                uA_x = uA_x.contiguous()
                 dist.all_reduce(uA_x, op=dist.ReduceOp.SUM, async_op=False)
-            self._all_reduce_inplace(lbias)
-            self._all_reduce_inplace(ubias)
+
+            result[0][0] = (lA_x, uA_x)
+            lbias = self._contiguous_all_reduce(lbias)
+            ubias = self._contiguous_all_reduce(ubias)
+            result = (result[0], lbias, ubias)
 
         return result
 
@@ -117,6 +126,7 @@ class BoundLinearTP_Row(BoundLinear):
         self._refresh_dist_state()
         output = super().forward(x, w, b)
         if self.use_tp and self.world_size > 1 and isinstance(output, torch.Tensor):
+            output = output.contiguous()
             dist.all_reduce(output, op=dist.ReduceOp.SUM, async_op=False)
         return output
 
@@ -125,8 +135,10 @@ class BoundLinearTP_Row(BoundLinear):
         lower, upper = super().interval_propagate(*v, C=C, w=w)
         if self.use_tp and self.world_size > 1:
             if isinstance(lower, torch.Tensor):
+                lower = lower.contiguous()
                 dist.all_reduce(lower, op=dist.ReduceOp.SUM, async_op=False)
             if isinstance(upper, torch.Tensor):
+                upper = upper.contiguous()
                 dist.all_reduce(upper, op=dist.ReduceOp.SUM, async_op=False)
         return lower, upper
 
