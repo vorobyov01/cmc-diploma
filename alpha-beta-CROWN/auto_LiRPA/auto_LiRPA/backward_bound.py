@@ -68,6 +68,13 @@ def _tp_accumulate_bias(node, lower_b, upper_b, lb, ub,
         partial_lb = torch.tensor(0., device=lb.device)
         partial_ub = torch.tensor(0., device=ub.device)
         in_partial = False
+    elif isinstance(node, BoundLinearTP_Row):
+        # Row's bias was divided by world_size in bound_backward, making
+        # it "partial". Add to partial accumulator so AllReduce at the
+        # next Col gives the correct total: sum(bias/ws) = bias.
+        partial_lb = partial_lb + lower_b
+        partial_ub = partial_ub + upper_b
+        in_partial = True
     elif in_partial:
         # Between Row and Col: biases are partial.
         partial_lb = partial_lb + lower_b
@@ -76,9 +83,6 @@ def _tp_accumulate_bias(node, lower_b, upper_b, lb, ub,
         # Full bias (before any Row, or between Col and Row).
         lb = lb + lower_b
         ub = ub + upper_b
-
-    if isinstance(node, BoundLinearTP_Row):
-        in_partial = True
 
     return lb, ub, in_partial, partial_lb, partial_ub
 
