@@ -64,10 +64,21 @@ def _shard_param(param_node: BoundParams, dim: int,
     )
 
 
+def _refresh_graph_shapes(model: 'BoundedModule', dummy_input: torch.Tensor):
+    """Run a forward pass to update output_shape and forward_value for all nodes.
+
+    After auto-sharding, weights change size and the cached shapes from the
+    initial JIT trace become stale. This forward pass fixes them.
+    """
+    with torch.no_grad():
+        model.forward(dummy_input)
+
+
 def tp_shard_bounded_module(
     model: 'BoundedModule',
     world_size: int,
     rank: int,
+    dummy_input: torch.Tensor = None,
 ) -> List[str]:
     """Replace BoundLinear nodes with TP-sharded equivalents in-place.
 
@@ -78,10 +89,15 @@ def tp_shard_bounded_module(
         (output layer is typically small and sharding it would break
         the C matrix / output specification)
 
+    After sharding, a forward pass is run to update cached output_shape values
+    throughout the graph. If ``dummy_input`` is not provided, the root node's
+    stored value is used.
+
     Args:
         model: A BoundedModule built from a regular (non-TP) model.
         world_size: Total number of TP ranks.
         rank: This process's rank.
+        dummy_input: Optional tensor to use for the shape-refresh forward pass.
 
     Returns:
         List of sharded node names (for debugging/logging).
@@ -133,5 +149,14 @@ def tp_shard_bounded_module(
         row_node.__class__ = BoundLinearTP_Row
         row_node._refresh_dist_state()
         sharded_names.append(row_node.name)
+
+    # Refresh graph shapes: run forward to update output_shape on every node,
+    # which became stale after we changed the weight dimensions.
+    if dummy_input is not None:
+        _refresh_graph_shapes(model, dummy_input)
+    else:
+        roots = model.roots()
+        if roots and hasattr(roots[0], 'value') and roots[0].value is not None:
+            _refresh_graph_shapes(model, roots[0].value)
 
     return sharded_names

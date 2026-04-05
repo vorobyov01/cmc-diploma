@@ -45,7 +45,7 @@ def main():
     log(rank, "BoundedModule created OK")
 
     log(rank, "Auto-sharding...")
-    sharded = tp_shard_bounded_module(lirpa, ws, rank)
+    sharded = tp_shard_bounded_module(lirpa, ws, rank, dummy_input=dummy)
     log(rank, f"Sharded: {sharded}")
 
     log(rank, "Building perturbation...")
@@ -79,7 +79,7 @@ def main():
             log(rank, f"  node: {type(node).__name__:30s} {name}")
 
     log(rank, "Auto-sharding ONNX model...")
-    sharded2 = tp_shard_bounded_module(lirpa2, ws, rank)
+    sharded2 = tp_shard_bounded_module(lirpa2, ws, rank, dummy_input=dummy)
     log(rank, f"Sharded ONNX: {sharded2}")
 
     # Print graph after sharding

@@ -180,7 +180,8 @@ def main():
     lirpa = BoundedModule(model, torch.empty_like(x), device=device)
 
     if args.mode == "tp" and world_size > 1:
-        sharded = tp_shard_bounded_module(lirpa, world_size, rank)
+        sharded = tp_shard_bounded_module(lirpa, world_size, rank,
+                                          dummy_input=torch.empty_like(x))
         if rank == 0:
             print(f"  Auto-sharded {len(sharded)} nodes: {sharded}")
 
@@ -199,7 +200,8 @@ def main():
         if m != methods[0]:
             lirpa = BoundedModule(model, torch.empty_like(x), device=device)
             if args.mode == "tp" and world_size > 1:
-                tp_shard_bounded_module(lirpa, world_size, rank)
+                tp_shard_bounded_module(lirpa, world_size, rank,
+                                        dummy_input=torch.empty_like(x))
             ptb = PerturbationLpNorm(norm=float("inf"), x_L=lower, x_U=upper)
             bounded_x = BoundedTensor(x, ptb)
 
