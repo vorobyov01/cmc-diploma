@@ -150,6 +150,11 @@ def tp_shard_bounded_module(
         row_node._refresh_dist_state()
         sharded_names.append(row_node.name)
 
+    # Mark nodes in the "sharded zone" (between each Col–Row pair).
+    # These nodes have sharded features, and CROWN backward starting from
+    # them should NOT use AllReduce (since it's a local computation).
+    _mark_sharded_zone(model, linears, n_pairs)
+
     # Refresh graph shapes: run forward to update output_shape on every node,
     # which became stale after we changed the weight dimensions.
     if dummy_input is not None:
@@ -160,3 +165,36 @@ def tp_shard_bounded_module(
             _refresh_graph_shapes(model, roots[0].value)
 
     return sharded_names
+
+
+def _mark_sharded_zone(model: 'BoundedModule', linears, n_pairs):
+    """Mark nodes between each Col-Row pair as being in the TP sharded zone.
+
+    Nodes in the sharded zone have features split across ranks. CROWN backward
+    computations starting from these nodes should NOT use AllReduce because
+    they compute local (per-rank) bounds.
+    """
+    for pair_idx in range(n_pairs):
+        col_node = linears[pair_idx * 2]
+        row_node = linears[pair_idx * 2 + 1]
+
+        # BFS from Col's outputs to find all nodes until Row (exclusive).
+        visited = set()
+        queue = deque()
+        for out_name in col_node.output_name:
+            if out_name != row_node.name:
+                queue.append(out_name)
+        # Col itself is also in the sharded zone.
+        col_node._tp_in_sharded_zone = True
+        visited.add(col_node.name)
+
+        while queue:
+            name = queue.popleft()
+            if name in visited or name == row_node.name:
+                continue
+            visited.add(name)
+            node = model[name]
+            node._tp_in_sharded_zone = True
+            for out_name in node.output_name:
+                if out_name != row_node.name:
+                    queue.append(out_name)

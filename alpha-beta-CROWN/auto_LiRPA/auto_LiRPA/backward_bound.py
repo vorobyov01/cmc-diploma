@@ -289,6 +289,12 @@ def backward_general(
     # local contribution). These must be AllReduced when the Col layer
     # is reached. See operators/tensor_parallel.py for the full design.
     _tp_active = _check_tp_active(self)
+    # Disable TP AllReduce when computing intermediate bounds for nodes
+    # in the sharded zone (between Col and Row).  These bounds are local
+    # per rank and must NOT be mixed via AllReduce.
+    if _tp_active and getattr(bound_node, '_tp_in_sharded_zone', False):
+        _tp_active = False
+        _tp_log(f"backward_general: DISABLED TP for sharded-zone node {bound_node.name}")
     if _tp_active:
         _tp_in_partial = False
         _tp_partial_lb = torch.tensor(0., device=self.device)
