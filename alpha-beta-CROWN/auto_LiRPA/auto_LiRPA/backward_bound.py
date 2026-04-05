@@ -54,8 +54,14 @@ def _check_tp_active(model: 'BoundedModule') -> bool:
 
 
 def _tp_accumulate_bias(node, lower_b, upper_b, lb, ub,
-                        in_partial, partial_lb, partial_ub):
+                        in_partial, partial_lb, partial_ub,
+                        start_zone_id=None):
     """TP-aware bias accumulation in the CROWN backward loop.
+
+    ``start_zone_id`` is the sharded-zone ID of the backward-pass start
+    node (None if the start node is not in any sharded zone).  When the
+    Col node being processed is in the SAME zone as the start node, the
+    computation is purely local and AllReduce must be skipped.
 
     Returns (lb, ub, in_partial, partial_lb, partial_ub).
     """
@@ -63,18 +69,25 @@ def _tp_accumulate_bias(node, lower_b, upper_b, lb, ub,
         BoundLinearTP_Col, BoundLinearTP_Row, DifferentiableAllReduce)
 
     if isinstance(node, BoundLinearTP_Col):
-        _tp_log(f"  accumulate_bias: Col node={node.name}, partial_lb type={type(partial_lb).__name__}, "
+        col_zone = getattr(node, '_tp_sharded_zone_id', None)
+        same_zone = (start_zone_id is not None and col_zone == start_zone_id)
+
+        _tp_log(f"  accumulate_bias: Col node={node.name}, zone={col_zone}, "
+                f"same_zone={same_zone}, partial_lb type={type(partial_lb).__name__}, "
                 f"numel={partial_lb.numel() if isinstance(partial_lb, torch.Tensor) else 'N/A'}")
         partial_lb = partial_lb + lower_b
         partial_ub = partial_ub + upper_b
-        if isinstance(partial_lb, torch.Tensor) and partial_lb.numel() > 1:
-            _tp_log(f"  AllReduce partial_lb shape={partial_lb.shape}")
-            partial_lb = DifferentiableAllReduce.apply(partial_lb.contiguous())
-            _tp_log(f"  AllReduce partial_lb DONE")
-        if isinstance(partial_ub, torch.Tensor) and partial_ub.numel() > 1:
-            _tp_log(f"  AllReduce partial_ub shape={partial_ub.shape}")
-            partial_ub = DifferentiableAllReduce.apply(partial_ub.contiguous())
-            _tp_log(f"  AllReduce partial_ub DONE")
+        if not same_zone:
+            if isinstance(partial_lb, torch.Tensor) and partial_lb.numel() > 1:
+                _tp_log(f"  AllReduce partial_lb shape={partial_lb.shape}")
+                partial_lb = DifferentiableAllReduce.apply(partial_lb.contiguous())
+                _tp_log(f"  AllReduce partial_lb DONE")
+            if isinstance(partial_ub, torch.Tensor) and partial_ub.numel() > 1:
+                _tp_log(f"  AllReduce partial_ub shape={partial_ub.shape}")
+                partial_ub = DifferentiableAllReduce.apply(partial_ub.contiguous())
+                _tp_log(f"  AllReduce partial_ub DONE")
+        else:
+            _tp_log(f"  SKIP AllReduce partial bias (same zone={col_zone})")
         lb = lb + partial_lb
         ub = ub + partial_ub
         partial_lb = torch.tensor(0., device=lb.device)
@@ -385,7 +398,8 @@ def backward_general(
                 lb, ub, _tp_in_partial, _tp_partial_lb, _tp_partial_ub = (
                     _tp_accumulate_bias(
                         l, lower_b, upper_b, lb, ub,
-                        _tp_in_partial, _tp_partial_lb, _tp_partial_ub))
+                        _tp_in_partial, _tp_partial_lb, _tp_partial_ub,
+                        start_zone_id=_tp_start_zone_id))
             else:
                 lb = lb + lower_b
                 ub = ub + upper_b
@@ -425,10 +439,11 @@ def backward_general(
     # processed is a Col which already flushes, but handle edge cases).
     if _tp_active and _tp_in_partial:
         from .operators.tensor_parallel import DifferentiableAllReduce
-        if isinstance(_tp_partial_lb, torch.Tensor) and _tp_partial_lb.numel() > 1:
-            _tp_partial_lb = DifferentiableAllReduce.apply(_tp_partial_lb.contiguous())
-        if isinstance(_tp_partial_ub, torch.Tensor) and _tp_partial_ub.numel() > 1:
-            _tp_partial_ub = DifferentiableAllReduce.apply(_tp_partial_ub.contiguous())
+        if _tp_start_zone_id is None:
+            if isinstance(_tp_partial_lb, torch.Tensor) and _tp_partial_lb.numel() > 1:
+                _tp_partial_lb = DifferentiableAllReduce.apply(_tp_partial_lb.contiguous())
+            if isinstance(_tp_partial_ub, torch.Tensor) and _tp_partial_ub.numel() > 1:
+                _tp_partial_ub = DifferentiableAllReduce.apply(_tp_partial_ub.contiguous())
         lb = lb + _tp_partial_lb
         ub = ub + _tp_partial_ub
 
