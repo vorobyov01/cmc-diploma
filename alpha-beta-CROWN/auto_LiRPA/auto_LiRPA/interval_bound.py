@@ -220,7 +220,7 @@ def check_IBP_first_linear(self: 'BoundedModule', node):
         intermediate_beta_enabled_layers = []
 
     if (node.name not in self.needed_A_dict.keys()
-            and (type(node) == BoundLinear
+            and (isinstance(node, BoundLinear)
                 or type(node) == BoundConv
                 and node.name not in intermediate_beta_enabled_layers)):
         if type(node.inputs[0]) == BoundInput:
