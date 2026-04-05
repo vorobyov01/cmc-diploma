@@ -59,10 +59,20 @@ def IBP_general(self: 'BoundedModule', node=None, C=None,
             # merge the last BoundLinear node with the specification, available
             # when weights of this layer are not perturbed
             ret = node.interval_propagate(*inp, C=C)
+            if isinstance(node, BoundLinear):
+                from .fsdp_utils import fsdp_free_node
+                for n_pre in node.inputs:
+                    if getattr(n_pre, '_fsdp_world_size', 0) > 1:
+                        fsdp_free_node(n_pre)
             _delete_unused_bounds(to_be_deleted_bounds)
             return ret
         else:
             node.interval = node.interval_propagate(*inp)
+            if isinstance(node, BoundLinear):
+                from .fsdp_utils import fsdp_free_node
+                for n_pre in node.inputs:
+                    if getattr(n_pre, '_fsdp_world_size', 0) > 1:
+                        fsdp_free_node(n_pre)
 
         node.lower, node.upper = node.interval
         if isinstance(node.lower, torch.Size):

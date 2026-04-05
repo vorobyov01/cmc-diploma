@@ -350,6 +350,9 @@ def backward_general(
                 if not hasattr(l, 'forward_value'):
                     self.get_forward_value(l)
                 lb, ub = add_constant_node(lb, ub, l)
+                if getattr(l, '_fsdp_world_size', 0) > 1:
+                    from .fsdp_utils import fsdp_free_node
+                    fsdp_free_node(l)
                 continue
 
             if l.zero_uA_mtx and l.zero_lA_mtx:
@@ -373,6 +376,15 @@ def backward_general(
                 l.preserve_mask = update_mask
             else:
                 start_shape = None
+
+            _fsdp_gathered = []
+            if isinstance(l, BoundLinear):
+                from .fsdp_utils import fsdp_gather_node, fsdp_free_node
+                for inp in l.inputs:
+                    if getattr(inp, '_fsdp_world_size', 0) > 1:
+                        fsdp_gather_node(inp)
+                        _fsdp_gathered.append(inp)
+
             if _tp_active:
                 _tp_log(f"bound_backward START: {type(l).__name__} name={l.name} "
                         f"lA={'None' if lA is None else lA.shape} "
@@ -383,6 +395,9 @@ def backward_general(
                 start_shape=start_shape)
             if _tp_active:
                 _tp_log(f"bound_backward DONE: {type(l).__name__} name={l.name}")
+
+            for inp in _fsdp_gathered:
+                fsdp_free_node(inp)
 
             # After propagation through this node, we delete its lA, uA variables.
             if bound_node.name != self.final_name:
