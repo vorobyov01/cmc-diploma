@@ -107,6 +107,8 @@ class BoundLinearTP_Col(BoundLinear):
 
     def bound_backward(self, last_lA, last_uA, *x, start_node=None,
                        reduce_bias=True, **kwargs):
+        import os, sys
+        _debug = os.environ.get('TP_DEBUG', '') == '1'
         result = super().bound_backward(last_lA, last_uA, *x, start_node=start_node,
                                        reduce_bias=reduce_bias, **kwargs)
 
@@ -116,15 +118,19 @@ class BoundLinearTP_Col(BoundLinear):
             lA_x, uA_x = result[0][0]
 
             if lA_x is not None and isinstance(lA_x, torch.Tensor):
+                if _debug:
+                    print(f"[TP rank={self.rank}] Col AllReduce lA_x shape={lA_x.shape}", flush=True, file=sys.stderr)
                 lA_x = DifferentiableAllReduce.apply(lA_x.contiguous())
+                if _debug:
+                    print(f"[TP rank={self.rank}] Col AllReduce lA_x DONE", flush=True, file=sys.stderr)
             if uA_x is not None and isinstance(uA_x, torch.Tensor):
+                if _debug:
+                    print(f"[TP rank={self.rank}] Col AllReduce uA_x shape={uA_x.shape}", flush=True, file=sys.stderr)
                 uA_x = DifferentiableAllReduce.apply(uA_x.contiguous())
+                if _debug:
+                    print(f"[TP rank={self.rank}] Col AllReduce uA_x DONE", flush=True, file=sys.stderr)
 
             result[0][0] = (lA_x, uA_x)
-            # Biases are NOT AllReduced here. They are handled by the TP bias
-            # tracking in backward_general (backward_bound.py). Col's biases
-            # are partial and will be AllReduced together with intermediate
-            # layer biases (e.g., ReLU relaxation) at the right time.
 
         return result
 
@@ -169,20 +175,32 @@ class BoundLinearTP_Row(BoundLinear):
         return res
 
     def interval_propagate(self, *v, C=None, w=None):
+        import os, sys
+        _debug = os.environ.get('TP_DEBUG', '') == '1'
         self._refresh_dist_state()
         if not (self.use_tp and self.world_size > 1):
             return super().interval_propagate(*v, C=C, w=w)
 
         has_bias = len(v) >= 3
+        if _debug:
+            print(f"[TP rank={self.rank}] Row interval_propagate: has_bias={has_bias}, len(v)={len(v)}", flush=True, file=sys.stderr)
 
         # Compute IBP without bias so AllReduce doesn't overcount it.
         lower, upper = super().interval_propagate(
             *(v[:2] if has_bias else v), C=C, w=w)
 
         if isinstance(lower, torch.Tensor):
+            if _debug:
+                print(f"[TP rank={self.rank}] Row AllReduce lower shape={lower.shape}", flush=True, file=sys.stderr)
             lower = DifferentiableAllReduce.apply(lower.contiguous())
+            if _debug:
+                print(f"[TP rank={self.rank}] Row AllReduce lower DONE", flush=True, file=sys.stderr)
         if isinstance(upper, torch.Tensor):
+            if _debug:
+                print(f"[TP rank={self.rank}] Row AllReduce upper shape={upper.shape}", flush=True, file=sys.stderr)
             upper = DifferentiableAllReduce.apply(upper.contiguous())
+            if _debug:
+                print(f"[TP rank={self.rank}] Row AllReduce upper DONE", flush=True, file=sys.stderr)
 
         if has_bias:
             bias_lb, bias_ub = v[2][0], v[2][1]

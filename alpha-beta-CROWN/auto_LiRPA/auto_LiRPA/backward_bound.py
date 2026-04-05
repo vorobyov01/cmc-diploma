@@ -30,6 +30,14 @@ from typing import TYPE_CHECKING, List
 if TYPE_CHECKING:
     from .bound_general import BoundedModule
 
+_TP_DEBUG = os.environ.get('TP_DEBUG', '') == '1'
+
+def _tp_log(msg):
+    if _TP_DEBUG and _dist.is_initialized():
+        import sys
+        rank = _dist.get_rank()
+        print(f"[TP rank={rank}] {msg}", flush=True, file=sys.stderr)
+
 
 def _check_tp_active(model: 'BoundedModule') -> bool:
     """Return True if TP nodes exist and distributed is initialized with ws>1."""
@@ -55,32 +63,33 @@ def _tp_accumulate_bias(node, lower_b, upper_b, lb, ub,
         BoundLinearTP_Col, BoundLinearTP_Row, DifferentiableAllReduce)
 
     if isinstance(node, BoundLinearTP_Col):
-        # Col's bias is partial. Accumulate it, then AllReduce all
-        # partial biases collected since the last Row layer.
+        _tp_log(f"  accumulate_bias: Col node={node.name}, partial_lb type={type(partial_lb).__name__}, "
+                f"numel={partial_lb.numel() if isinstance(partial_lb, torch.Tensor) else 'N/A'}")
         partial_lb = partial_lb + lower_b
         partial_ub = partial_ub + upper_b
         if isinstance(partial_lb, torch.Tensor) and partial_lb.numel() > 1:
+            _tp_log(f"  AllReduce partial_lb shape={partial_lb.shape}")
             partial_lb = DifferentiableAllReduce.apply(partial_lb.contiguous())
+            _tp_log(f"  AllReduce partial_lb DONE")
         if isinstance(partial_ub, torch.Tensor) and partial_ub.numel() > 1:
+            _tp_log(f"  AllReduce partial_ub shape={partial_ub.shape}")
             partial_ub = DifferentiableAllReduce.apply(partial_ub.contiguous())
+            _tp_log(f"  AllReduce partial_ub DONE")
         lb = lb + partial_lb
         ub = ub + partial_ub
         partial_lb = torch.tensor(0., device=lb.device)
         partial_ub = torch.tensor(0., device=ub.device)
         in_partial = False
     elif isinstance(node, BoundLinearTP_Row):
-        # Row's bias was divided by world_size in bound_backward, making
-        # it "partial". Add to partial accumulator so AllReduce at the
-        # next Col gives the correct total: sum(bias/ws) = bias.
+        _tp_log(f"  accumulate_bias: Row node={node.name}")
         partial_lb = partial_lb + lower_b
         partial_ub = partial_ub + upper_b
         in_partial = True
     elif in_partial:
-        # Between Row and Col: biases are partial.
+        _tp_log(f"  accumulate_bias: intermediate node={node.name} (partial)")
         partial_lb = partial_lb + lower_b
         partial_ub = partial_ub + upper_b
     else:
-        # Full bias (before any Row, or between Col and Row).
         lb = lb + lower_b
         ub = ub + upper_b
 
@@ -345,10 +354,16 @@ def backward_general(
                 l.preserve_mask = update_mask
             else:
                 start_shape = None
+            if _tp_active:
+                _tp_log(f"bound_backward START: {type(l).__name__} name={l.name} "
+                        f"lA={'None' if lA is None else lA.shape} "
+                        f"uA={'None' if uA is None else uA.shape}")
             A, lower_b, upper_b = l.bound_backward(
                 lA, uA, *l.inputs,
                 start_node=bound_node, unstable_idx=unstable_idx,
                 start_shape=start_shape)
+            if _tp_active:
+                _tp_log(f"bound_backward DONE: {type(l).__name__} name={l.name}")
 
             # After propagation through this node, we delete its lA, uA variables.
             if bound_node.name != self.final_name:
