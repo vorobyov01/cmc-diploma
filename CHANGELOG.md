@@ -1,5 +1,34 @@
 # Changelog
 
+## 2026-03-08 — Добавлен эксперимент OOM (single GPU) vs TP=2
+
+### Что добавлено
+
+**Файл:** `alpha-beta-CROWN/auto_LiRPA/examples/simple/oom_tp_experiment.py`
+
+Добавлен отдельный скрипт для воспроизводимого эксперимента:
+- `--mode single` — обычная dense-модель на одной GPU (базовый сценарий для OOM)
+- `--mode tp` — TP-модель (`SimpleTPModel`) для запуска через `torchrun --nproc_per_node=2`
+- единые параметры (`input_dim`, `hidden_dim`, `batch_size`, `method`) для честного сравнения
+- печать пикового потребления памяти (`max_memory_allocated`, `max_memory_reserved`) по ранкам
+- явная детекция OOM с кодом выхода `2`
+
+### Как запускать
+
+```bash
+# 1) Single GPU: пытаемся получить OOM
+python3 examples/simple/oom_tp_experiment.py \
+  --mode single --method CROWN \
+  --input-dim 4096 --hidden-dim 262144 --batch-size 2048
+
+# 2) Те же параметры, TP=2
+torchrun --nproc_per_node=2 examples/simple/oom_tp_experiment.py \
+  --mode tp --method CROWN \
+  --input-dim 4096 --hidden-dim 262144 --batch-size 2048
+```
+
+Ожидаемое поведение: `single` падает с OOM, при этом `tp` на тех же параметрах проходит и показывает меньшую память на ранк.
+
 ## 2026-02-24 — Исправление JIT-трассировки и запуска TP-тестов
 
 ### Контекст
