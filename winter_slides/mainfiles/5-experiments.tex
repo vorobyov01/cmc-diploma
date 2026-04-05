@@ -1,0 +1,120 @@
+%!TEX root = ../nauchka.tex
+
+\section{Планируемые эксперименты}
+
+\begin{frame}
+\frametitle{Цель экспериментов}
+
+\begin{block}{Главный вопрос}
+Подтвердить, что Tensor Parallelism решает проблему памяти и позволяет верифицировать модели, которые не влезают на один GPU
+\end{block}
+
+\vspace{0.5cm}
+
+\textbf{Гипотеза:}
+\begin{itemize}
+    \item Модель размера $M$ вызывает OOM на 1 GPU
+    \item Та же модель с TP=N успешно верифицируется на N GPU
+    \item Модель размера $M \times N$ с TP=N использует примерно столько же памяти, как модель $M$ на 1 GPU
+\end{itemize}
+
+\end{frame}
+
+\begin{frame}
+\frametitle{Эксперимент 1: Базовый тест памяти}
+
+\textbf{Задача:} Найти точку OOM для одного GPU
+
+\vspace{0.3cm}
+
+\textbf{Метод:}
+\begin{enumerate}
+    \item Взять простую модель (MLP или WideResNet)
+    \item Постепенно увеличивать ширину слоев
+    \item Для каждого размера запускать верификацию и измерять память
+    \item Найти размер $M$, при котором происходит OOM
+\end{enumerate}
+
+\vspace{0.3cm}
+
+\textbf{Ожидаемый результат:}
+\begin{itemize}
+    \item Определена граница $M$ для одного GPU
+    \item Установлена baseline для сравнения с TP
+\end{itemize}
+
+\end{frame}
+
+\begin{frame}
+\frametitle{Эксперимент 2: TP масштабирование}
+
+\textbf{Задача:} Проверить, что TP позволяет верифицировать модель размера $M \times N$ на N GPU
+
+\vspace{0.3cm}
+
+\textbf{Метод:}
+\begin{enumerate}
+    \item Взять модель размера $M$ (которая вызывает OOM на 1 GPU)
+    \item Запустить с TP=2 на 2 GPU
+    \item Проверить, что верификация проходит успешно
+    \item Увеличить модель до размера $2M$ с TP=2
+    \item Измерить потребление памяти на каждом GPU
+\end{enumerate}
+
+\vspace{0.3cm}
+
+\textbf{Ожидаемый результат:}
+\begin{itemize}
+    \item Модель $M$ с TP=2 успешно верифицируется
+    \item Модель $2M$ с TP=2 использует примерно столько же памяти на GPU, как модель $M$ на 1 GPU
+    \item Доказано, что TP решает проблему масштабируемости
+\end{itemize}
+
+\end{frame}
+
+\begin{frame}
+\frametitle{Эксперимент 3: Точность границ}
+
+\textbf{Задача:} Убедиться, что распределенное вычисление не влияет на точность границ
+
+\vspace{0.3cm}
+
+\textbf{Метод:}
+\begin{enumerate}
+    \item Взять модель, которая влезает на 1 GPU
+    \item Вычислить границы обычным способом (без TP)
+    \item Вычислить границы с TP=2
+    \item Сравнить результаты (должны совпадать с точностью до floating point)
+\end{enumerate}
+
+\vspace{0.3cm}
+
+\textbf{Ожидаемый результат:}
+\begin{itemize}
+    \item Границы совпадают с точностью $10^{-6}$
+    \item Распределенное вычисление корректно
+\end{itemize}
+
+\end{frame}
+
+\begin{frame}
+\frametitle{Следующие шаги}
+
+\begin{block}{Краткосрочные задачи}
+\begin{enumerate}
+    \item Завершить реализацию и тестирование на 2 GPU
+    \item Провести эксперименты 1-3
+    \item Интегрировать с полным циклом AlphaBetaCROWN
+\end{enumerate}
+\end{block}
+
+\vspace{0.3cm}
+
+\begin{block}{Долгосрочные задачи (к защите диплома)}
+\begin{enumerate}
+    \item Оптимизация коммуникаций (overlapping)
+    \item Тестирование на реальных больших моделях (Transformers, LLM)
+\end{enumerate}
+\end{block}
+
+\end{frame}

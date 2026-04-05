@@ -91,9 +91,6 @@ def fsdp_free_gathered_weights(model: 'BoundedModule'):
     for node in model.nodes():
         if isinstance(node, BoundParams) and hasattr(node, '_fsdp_world_size'):
             node.forward_value = None
-            if hasattr(node, 'interval'):
-                del node.interval
-            if hasattr(node, 'lower'):
-                del node.lower
-            if hasattr(node, 'upper'):
-                del node.upper
+            node.interval = None
+            node.lower = None
+            node.upper = None

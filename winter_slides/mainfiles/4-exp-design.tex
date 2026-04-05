@@ -1,0 +1,91 @@
+%!TEX root = ../nauchka.tex
+
+\section{Существующие решения: Llama 3 и DeepSeek-V3}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Обучение Llama 3}
+
+\begin{frame}
+  \frametitle{Конфигурация обучения Llama 3}
+  \begin{table}[h]
+    \centering
+    \begin{tabular}{|l|l|l|l|}
+      \hline
+      \textbf{Модель} & \textbf{Llama 3 8B} & \textbf{Llama 3 72B} & \textbf{Llama 3 405B} \\
+      \hline
+      Количество GPU & 8,192 & 16,384 & 16,384 \\
+      \hline
+      Метод обучения & DP, MP & DP, MP & DP, MP, PP, CP \\
+      \hline
+      TP & 8 & 8 & 8 \\
+      \hline
+      DP & 64 & 128 & 128 \\
+      \hline
+      CP & — & — & 16 \\
+      \hline
+      PP & — & — & 16 \\
+      \hline
+      Длина контекста & 8K & 8K & 128K \\
+      \hline
+      Batch size (на DP) & 32 & 16 & 16 \\
+      \hline
+      Tokens per Batch & 16M & 16M & 16M \\
+      \hline
+      Peak TFLOPs/GPU & 430 & 400 & 380 \\
+      \hline
+    \end{tabular}
+    \caption{Параметры обучения моделей Llama 3}
+  \end{table}
+\end{frame}
+
+\begin{frame}{Конфигурация обучения Llama 3}
+  \begin{figure}
+    \centering
+    \includegraphics[width=0.8\textwidth]{llama3_topo.png}
+    \caption{Топология распределённого обучения Llama 3}
+    \label{fig:llama3}
+  \end{figure}
+  \vspace{0.5cm}
+  \begin{flushright}
+    \tiny Источник: \url{https://arxiv.org/abs/2407.21783}
+  \end{flushright}
+\end{frame}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Обучение DeepSeek-V3}
+
+\begin{frame}
+  \frametitle{Конфигурация обучения DeepSeek-V3}
+  \begin{table}[h]
+    \centering
+    \begin{tabular}{|l|l|}
+      \hline
+      \textbf{Параметр} & \textbf{Значение} \\
+      \hline
+      Количество GPU & 2048 H800 \\
+      \hline
+      Топология & Единый кластер из 2048 H800 GPU \\
+      \hline
+      Метод обучения & Expert Parallelism (EP), DP, PP \\
+      \hline
+      Параметры обучения & EP: 64, DP: 8, PP: 16 \\
+      \hline
+      Всего параметров & 671B (активируется 37B на токен) \\
+      \hline
+    \end{tabular}
+    \caption{Параметры обучения модели DeepSeek-V3}
+  \end{table}
+\end{frame}
+
+\begin{frame}{Конфигурация обучения DeepSeek-V3}
+  \begin{figure}
+    \centering
+    \includegraphics[width=0.8\textwidth]{dualpipe.png}
+    \caption{Pipeline Parallel в модели DeepSeek V3/R1}
+    \label{fig:deepseek}
+  \end{figure}
+  \vspace{0.5cm}
+  \begin{flushright}
+    \tiny Источник: \url{https://arxiv.org/abs/2412.19437v1}
+  \end{flushright}
+\end{frame}

@@ -1,0 +1,167 @@
+%!TEX root = ../nauchka.tex
+
+\section{Вертикальное масштабирование}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Оптимизации на уровне одного GPU}
+
+\begin{frame}
+  \frametitle{Вертикальное масштабирование: проблема памяти}
+  \begin{itemize}
+    \item Цель: уменьшить потребление памяти на \textbf{одном GPU}, чтобы поместить бóльшую модель или батч.
+    \item Основные потребители памяти при обучении:
+      \begin{itemize}
+        \item Веса модели: $M_{\text{weights}}$
+        \item Градиенты: $M_{\text{grad}}$ (столько же, сколько веса)
+        \item Состояния оптимизатора: $M_{\text{opt}}$ (обычно $2 \times M_{\text{weights}}$ для Adam)
+        \item Промежуточные активации: $M_{\text{act}}$
+          \[
+            M_{\text{act}} \propto B \cdot L \cdot S \cdot H 
+          \]
+          ($B$ - батч, $L$ - число слоев, $S$ - длина последовательности, $H$ - скрытый размер)
+          \textbf{Часто являются основным узким местом.}
+      \end{itemize}
+    \item Методы вертикального масштабирования направлены на сокращение одного или нескольких из этих компонентов.
+  \end{itemize}
+\end{frame}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\begin{frame}
+  \frametitle{Activation Checkpointing (Gradient Checkpointing)}
+  \begin{itemize}
+    \item Идея: не хранить все активации для обратного прохода.
+    \item Вместо этого, некоторые активации \textbf{перевычисляются} во время обратного прохода.
+    \item Преимущества:
+      \begin{itemize}
+        \item Значительно сокращает $M_{\text{act}}$.
+        \item Позволяет использовать бóльшие батчи или более длинные последовательности.
+      \end{itemize}
+    \item Недостатки:
+      \begin{itemize}
+        \item Увеличивает время обучения из-за дополнительных прямых проходов (обычно ~30\% для трансформеров).
+      \end{itemize}
+    \item Пример: при чекпоинтинге каждого слоя трансформера, потребление памяти под активации снижается с $O(L)$ до $O(\sqrt{L})$ или даже $O(1)$ в зависимости от стратегии.
+  \end{itemize}
+  \vspace{0.5cm}
+  \begin{flushright}
+    \tiny Источник: \url{https://arxiv.org/abs/1911.13214}
+  \end{flushright}
+\end{frame}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\begin{frame}
+  \frametitle{Fusing Operations (Kernel Fusion)}
+  \begin{itemize}
+    \item Идея: объединить несколько последовательных операций GPU (ядер) в одно «супер-ядро».
+    \item Примеры:
+      \begin{itemize}
+        \item Bias + ReLU $\rightarrow$ FusedBiasReLU
+        \item Несколько поэлементных операций.
+        \item Слой LayerNorm, Attention-слои могут быть частично слиты.
+      \end{itemize}
+    \item Преимущества:
+      \begin{itemize}
+        \item \textbf{Уменьшает нагрузку на память (memory bandwidth):} промежуточные результаты остаются в кэше/регистрах, а не записываются/читаются из глобальной памяти GPU.
+        \item \textbf{Снижает накладные расходы на запуск ядер.}
+        \item Ускоряет выполнение.
+      \end{itemize}
+    \item Может незначительно уменьшить пиковое потребление памяти за счет отсутствия промежуточных тензоров в глобальной памяти.
+  \end{itemize}
+  \vspace{0.5cm}
+  \begin{flushright}
+    \tiny Источник: \url{https://hazyresearch.stanford.edu/blog/2024-05-12-tk}
+  \end{flushright}
+\end{frame}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\begin{frame}
+  \frametitle{FlashAttention}
+  \begin{itemize}
+    \item \textbf{I/O-aware exact attention algorithm}, не аппроксимация.
+    \item Проблема стандартной реализации attention:
+      \begin{itemize}
+        \item Требует материализации матрицы внимания $P = \text{softmax}(\frac{QK^T}{\sqrt{d_k}})$ размером $S \times S$.
+        \item Потребление памяти для $P$: $O(S^2)$.
+        \item Множественные чтения/записи $Q, K, V$ из медленной HBM.
+      \end{itemize}
+    \item FlashAttention использует \textbf{tiling (разбиение на блоки)} и \textbf{recomputation (перевычисление)}:
+      \begin{itemize}
+        \item Загружает блоки $Q, K, V$ в быструю SRAM.
+        \item Вычисляет блоки матрицы внимания и агрегирует результат на лету, \textbf{не материализуя полную матрицу $P$ в HBM}.
+      \end{itemize}
+    \item Преимущества:
+      \begin{itemize}
+        \item Снижает потребление памяти для attention с $O(S^2)$ до $O(S)$ (для промежуточных вычислений, не для хранения активаций $Q,K,V$ для backward pass).
+        \item Значительно ускоряет вычисление attention (до ~2-4x).
+      \end{itemize}
+  \end{itemize}
+  \vspace{0.5cm}
+  \begin{flushright}
+    \tiny Источник: \url{https://arxiv.org/abs/2205.14135}
+  \end{flushright}
+\end{frame}
+
+% Можно добавить слайд с картинкой для FlashAttention, если найдете подходящую
+% \begin{frame}{FlashAttention: Иллюстрация}
+%   \begin{figure}
+%     \centering
+%     \includegraphics[width=0.7\textwidth]{flash_attention_concept.png} % Пример имени файла
+%     \caption{Концепция FlashAttention (Tiling)}
+%     \label{fig:flash_attention}
+%   \end{figure}
+%   \vspace{0.5cm}
+%   \begin{flushright}
+%     \tiny Источник: \url{https://arxiv.org/abs/2205.14135}
+%   \end{flushright}
+% \end{frame}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\begin{frame}
+  \frametitle{Mixed Precision Training}
+  \begin{itemize}
+    \item Идея: использовать форматы с пониженной точностью (FP16, BF16) для большинства вычислений и хранения, сохраняя FP32 для критических частей.
+    \item Компоненты:
+      \begin{itemize}
+        \item \textbf{FP16/BF16}: веса, активации, градиенты.
+        \item \textbf{FP32}: мастер-копия весов (для аккумулирования градиентов и обновлений), вычисление лосса (иногда).
+      \end{itemize}
+    \item \textbf{Loss Scaling} (особенно для FP16):
+      \begin{itemize}
+        \item Градиенты в FP16 могут быть слишком малы (underflow).
+        \item Лосс умножается на скаляр (scaling factor) перед backward pass.
+        \item Градиенты делятся на тот же скаляр перед обновлением весов.
+      \end{itemize}
+    \item Преимущества:
+      \begin{itemize}
+        \item В ~2 раза уменьшает $M_{\text{weights}}$, $M_{\text{grad}}$, $M_{\text{act}}$.
+        \item Ускоряет вычисления на GPU с Tensor Cores.
+      \end{itemize}
+  \end{itemize}
+  \vspace{0.5cm}
+  \begin{flushright}
+    \tiny Источник: \url{https://developer.nvidia.com/blog/video-mixed-precision-techniques-tensor-cores-deep-learning/}
+  \end{flushright}
+\end{frame}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\begin{frame}
+  \frametitle{BF16 и FP8 форматы}
+  \begin{itemize}
+    \item \textbf{BFloat16 (BF16)}:
+      \begin{itemize}
+        \item Формат: 1 знаковый бит, 8 бит экспоненты, 7 бит мантиссы.
+        \item Такой же диапазон экспоненты, как у FP32 $\implies$ более устойчив к переполнению/исчезновению по сравнению с FP16.
+        \item Меньшая точность мантиссы, чем у FP16.
+        \item Часто не требует loss scaling. Широко используется для обучения LLM.
+      \end{itemize}
+    \item \textbf{FP8 (8-bit Floating Point)}:
+      \begin{itemize}
+        \item Несколько вариантов: E4M3 (4 бит экспоненты, 3 мантиссы) и E5M2 (5 бит экспоненты, 2 мантиссы).
+        \item E4M3: бóльшая точность, меньший диапазон.
+        \item E5M2: меньшая точность, бóльший диапазон.
+        \item Требует специальных техник для поддержания качества модели (например, динамическое масштабирование, гибридное использование с BF16).
+        \item Обеспечивает еще большее сокращение памяти (~4x по сравнению с FP32) и ускорение.
+        \item Поддерживается на новых GPU (Hopper H100+).
+      \end{itemize}
+  \end{itemize}
+\end{frame}

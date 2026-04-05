@@ -1,0 +1,131 @@
+%!TEX root = ../nauchka.tex
+
+\section{Выбор метода параллелизма}
+
+\begin{frame}
+\frametitle{Сравнение подходов}
+
+\begin{table}[h]
+\centering
+\scriptsize
+\begin{tabular}{|l|c|c|c|}
+\hline
+\textbf{Характеристика} & \textbf{TP} & \textbf{PP} & \textbf{FSDP} \\
+\hline
+Память на GPU & $O(M/P)$ & $O(M/P)$ & $O(M)$ \\
+\hline
+Коммуникации & Высокие & Высокие & Низкие \\
+\hline
+Шардирует $A$-матрицы & Да & Нет & Нет \\
+\hline
+Подходит для BaB & Да & Нет & Нет \\
+\hline
+Сложность реализации & Высокая & Очень высокая & Средняя \\
+\hline
+\end{tabular}
+\end{table}
+
+\vspace{0.5cm}
+
+\textbf{Вывод:} Tensor Parallelism --- оптимальный выбор для верификации
+
+\end{frame}
+
+\begin{frame}
+\frametitle{Tensor Parallelism: Column Parallel}
+
+\begin{block}{Column Parallel слой}
+Веса разделены по \textbf{выходной} размерности
+\end{block}
+
+\vspace{0.3cm}
+
+\textbf{Прямой проход:} $Y = X \cdot W$
+\begin{itemize}
+    \item $W = [W_0 | W_1]$ разделен между GPU
+    \item $Y = [Y_0 | Y_1]$ также разделен
+    \item Требуется AllGather для получения полного $Y$
+\end{itemize}
+
+\vspace{0.3cm}
+
+\textbf{Обратный CROWN:} $A_{prev} = A_{curr} \cdot W$
+\begin{itemize}
+    \item $A_{curr}$ уже разделена: $[A_0 | A_1]$
+    \item Локально: $P_i = A_i \cdot W_i$ (частичное произведение)
+    \item \textbf{AllReduce:} $A_{prev} = P_0 + P_1$ на всех GPU
+\end{itemize}
+
+\end{frame}
+
+\begin{frame}
+\frametitle{Tensor Parallelism: Row Parallel}
+
+\begin{block}{Row Parallel слой}
+Веса разделены по \textbf{входной} размерности
+\end{block}
+
+\vspace{0.3cm}
+
+\textbf{Прямой проход:} $Y = X \cdot W$
+\begin{itemize}
+    \item $X = [X_0 | X_1]$ разделен между GPU
+    \item Локально: $P_i = X_i \cdot W_i$
+    \item AllReduce: $Y = P_0 + P_1$
+\end{itemize}
+
+\vspace{0.3cm}
+
+\textbf{Обратный CROWN:} $A_{prev} = A_{curr} \cdot W$
+\begin{itemize}
+    \item $A_{curr}$ реплицирована (полная матрица на всех GPU)
+    \item Локально: $A_{prev,i} = A_{curr} \cdot W_i$
+    \item Результат автоматически разделен
+    \item \textbf{Коммуникация не нужна!}
+\end{itemize}
+
+\end{frame}
+
+\begin{frame}
+\frametitle{Почему не Pipeline Parallelism?}
+
+\begin{alertblock}{Проблемы PP для верификации}
+\begin{enumerate}
+    \item \textbf{Skip connections} в ResNet/Transformer требуют передачи матриц $A$ между GPU
+    \item \textbf{Двунаправленные зависимости:}
+    \begin{itemize}
+        \item Прямой проход: для вычисления границ ReLU
+        \item Обратный CROWN: для распространения $A$
+    \end{itemize}
+    \item \textbf{Bubbles:} PP эффективен только при большом количестве микро-батчей, но в верификации одного изображения такого нет
+    \item НЕ шардирует матрицы $A$ --- проблема памяти остается!
+\end{enumerate}
+\end{alertblock}
+
+\vspace{0.3cm}
+
+\textbf{Вывод:} PP применим только для очень глубоких сетей без skip connections
+
+\end{frame}
+
+\begin{frame}
+\frametitle{Почему не FSDP?}
+
+\begin{alertblock}{Проблемы FSDP для верификации}
+\begin{enumerate}
+    \item В режиме inference (верификация) нет:
+    \begin{itemize}
+        \item Градиентов
+        \item Состояний оптимизатора
+    \end{itemize}
+    \item Веса модели обычно малы по сравнению с матрицами $A$
+    \item FSDP НЕ шардирует активации и промежуточные матрицы $A$
+    \item Решает проблему хранения весов, но игнорирует главную проблему верификации
+\end{enumerate}
+\end{alertblock}
+
+\vspace{0.3cm}
+
+\textbf{Вывод:} FSDP не решает проблему памяти для матриц $A$
+
+\end{frame}

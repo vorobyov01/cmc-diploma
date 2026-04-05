@@ -1,0 +1,66 @@
+%!TEX root = ../nauchka.tex
+
+\section{Задача верификации нейронных сетей}
+
+\begin{frame}
+\frametitle{Формальная верификация нейронных сетей}
+
+\begin{block}{Задача}
+Доказать, что для любого входа $x \in \mathcal{C}$ (область возмущений), выход сети $f(x)$ принадлежит безопасному множеству $\mathcal{S}$.
+\end{block}
+
+\vspace{0.5cm}
+
+\textbf{Пример:} Верификация устойчивости к состязательным атакам
+\begin{itemize}
+    \item Дано: изображение $x$, модель $f$, радиус возмущения $\epsilon$
+    \item Проверить: для всех $x' : ||x - x'||_\infty \leq \epsilon$ выполняется $\arg\max f(x) = \arg\max f(x')$
+\end{itemize}
+
+\end{frame}
+
+\begin{frame}
+\frametitle{Методы верификации: CROWN}
+
+\begin{block}{Алгоритм CROWN}
+Находит линейные границы выхода сети через обратное распространение:
+$$\underline{W}_j x + \underline{b}_j \leq f_j(x) \leq \overline{W}_j x + \overline{b}_j$$
+\end{block}
+
+\vspace{0.3cm}
+
+\textbf{Ключевая операция:} $A_{prev} = A_{curr} \cdot W$
+
+\begin{itemize}
+    \item $A$ --- матрица символьных границ, размер: $(Batch \times Spec \times Neurons)$
+    \item Для глубоких сетей матрицы $A$ занимают огромный объем памяти
+    \item \textbf{AlphaBetaCROWN} --- state-of-the-art верификатор (победитель VNN-COMP 2021-2023)
+\end{itemize}
+
+\end{frame}
+
+\begin{frame}
+\frametitle{Проблема масштабируемости}
+
+\begin{alertblock}{Барьер памяти (Memory Wall)}
+Размер матриц $A$ растет как $O(Batch \times Spec \times Neurons)$
+\end{alertblock}
+
+\vspace{0.3cm}
+
+\textbf{Пример:} Для трансформера с $N=4096$, $B=128$, $S=10$:
+\begin{itemize}
+    \item Одна матрица $A$: $\sim 20$ МБ
+    \item Для всех слоев: может превысить 80 ГБ на A100
+\end{itemize}
+
+\vspace{0.3cm}
+
+\begin{block}{Разрыв возможностей}
+\begin{itemize}
+    \item \textbf{Обучение:} модели на миллиарды параметров, тысячи GPU
+    \item \textbf{Верификация:} ограничена памятью одного GPU
+\end{itemize}
+\end{block}
+
+\end{frame}

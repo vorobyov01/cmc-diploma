@@ -1,0 +1,129 @@
+%!TEX root = ../nauchka.tex
+
+\section{Масштабирование обучения и инференса LLM}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Мотивация масштабирования}
+
+\begin{frame}{AI Timeline}
+  \begin{figure}
+    \centering
+    \includegraphics[width=0.8\textwidth]{aitimeline.png}
+    \caption{AI Timeline}
+    \label{fig:aitimeline}
+  \end{figure}
+\end{frame}
+
+\begin{frame}{Прогноз мастшабов обучения к 2030}
+  \begin{figure}
+    \centering
+    \includegraphics[width=0.8\textwidth]{epochai.png}
+    \caption{Количество комьюта (FLOPS) по годам}
+    \label{fig:epochai}
+  \end{figure}
+  \vspace{0.5cm}
+  \begin{flushright}
+    \tiny Источник: \url{https://epoch.ai/blog/can-ai-scaling-continue-through-2030}
+  \end{flushright}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Аппаратные ограничения GPU}
+  \begin{itemize}
+    \item Современные GPU (например, NVIDIA A100, H100):
+      \begin{itemize}
+        \item Память: от 40 до 80 ГБ;
+        \item Вычислительные блоки: тысячи CUDA ядер, сотни тензорных ядер.
+        \item Горизонтальное масштабирование;
+      \end{itemize}
+    \item Интерконнект
+      \begin{itemize}
+        \item Ограниченная пропускная способность памяти и интерконнекта между устройствами.
+        \item Дорогая инфраструктура
+      \end{itemize}
+  \end{itemize}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Цель работы}
+  \begin{itemize}
+  \item[1)] Систематизация методов вертикального масштабирования обучения LLM;
+  \item[2)] Обзор методов горизонтального масштабирования и их кросс-взаимодействия;
+  \item[3)] Обзор текущих проблем и ограничений инфраструктуры;
+  \end{itemize}
+\end{frame}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Расходы по памяти}
+
+\begin{frame}
+  \frametitle{Память для обучения}
+  \begin{itemize}
+    \item Современные модели содержат $N \gtrsim 10^9$ параметров.
+    \item Ограничения памяти GPU:
+      \begin{itemize}
+        \item Веса: 
+        \[
+          M_w = N \cdot b, \quad \text{где } b \text{ --- байт на параметр.}
+        \]
+        \item Градиенты: 
+        \[
+          M_g = N \cdot b.
+        \]
+        \item Оптимайзер: 
+        \[
+          M_{\text{opt}} = c \cdot N \cdot b, \quad \text{где } c\approx2\text{–}3.
+        \]
+      \end{itemize}
+  \end{itemize}
+\end{frame}
+\begin{frame}
+  \frametitle{Память для обучения}
+  \begin{itemize}
+      \item Промежуточные активации: так же зависит от размера батча, количества слоев и скрытого состояния.
+      \item Общая формула для обучения:
+      \[
+        M_{\text{train}} = N \cdot b \cdot (2 + c) + M_{\text{act}}.
+      \]
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Memory consuption}
+  \begin{figure}
+    \centering
+    \includegraphics[width=0.8\textwidth]{zero.png}
+    \caption{Memory consuption}
+    \label{fig:zero}
+  \end{figure}
+  \vspace{0.5cm}
+  \begin{flushright}
+    \tiny Источник: \url{https://arxiv.org/pdf/1910.02054}
+  \end{flushright}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Современные LLM}
+  \begin{table}[h]
+    \centering
+    \begin{tabular}{|l|c|c|}
+      \hline
+      \textbf{Модель} & \textbf{Год выпуска} & \textbf{Размер (млрд параметров)} \\
+      \hline
+      LLaMA 2         & 2023                 & 70                               \\
+      LLaMA 3.1       & 2024                 & 405                              \\
+      Qwen 7B         & 2023                 & 7                                \\
+      Qwen 2.5-Max    & 2025                 & 72                               \\
+      DeepSeek V3/R1  & 2024                 & 671                              \\
+      DeepSeek-LLM 7B & 2023                 & 7                                \\
+      Mistral 7B      & 2023                 & 7                                \\
+      Mixtral 8x7B    & 2023                 & 56                               \\
+      \hline
+    \end{tabular}
+    \caption{Значимые open-source LLM модели}
+    \label{tab:llm_models}
+  \end{table}
+  \vspace{0.5cm}
+  \begin{flushright}
+    \tiny Источник: \url{https://huggingface.co}
+  \end{flushright}
+\end{frame}

@@ -1,0 +1,207 @@
+%!TEX root = ../nauchka.tex
+
+\section{Масштабирование обучения}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Примитивные методы распараллеливания: Data Parallelism (DP)}
+
+\begin{frame}
+  \frametitle{Data Parallelism (DP)}
+  \begin{itemize}
+    \item На каждом устройстве хранится полная копия модели.
+    \item Память, затрачиваемая на обучение, включает:
+      \begin{itemize}
+        \item Веса: $M_{\text{weights}}$,
+        \item Градиенты: $M_{\text{grad}}$,
+        \item Состояния оптимайзера: $M_{\text{opt}}$,
+        \item Промежуточные активации: 
+        \[
+          M_{\text{act}} \propto B \cdot \sum_{l=1}^{L} S_l,
+        \]
+        где $B$ --- размер батча, $L$ --- число слоёв, $S_l$ --- объём активаций слоя $l$.
+      \end{itemize}
+    \item Общая формула:
+    \[
+      M_{\text{DP}} = M_{\text{weights}} + M_{\text{grad}} + M_{\text{opt}} + M_{\text{act}}.
+    \]
+    \item Синхронизация градиентов через All-Reduce.
+  \end{itemize}
+  \vspace{0.5cm}
+  \begin{flushright}
+    \tiny Источник: \url{https://arxiv.org/abs/1910.02054}
+  \end{flushright}
+\end{frame}
+
+\begin{frame}{Data Parallelism (DP)}
+  \begin{figure}
+    \centering
+    \includegraphics[width=0.5\textwidth]{dp.png}
+    \caption{Data Parallelism (DP)}
+    \label{fig:dp}
+  \end{figure}
+  \vspace{0.5cm}
+  \begin{flushright}
+    \tiny Источник: \url{https://colossalai.org/docs/concepts/paradigms_of_parallelism}
+  \end{flushright}
+\end{frame}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Model Parallel: Tensor Parallelism (TP) и Pipeline Parallelism (PP)}
+
+\begin{frame}
+  \frametitle{Tensor Parallelism (TP)}
+  \begin{itemize}
+    \item Разделение весов модели между $k$ GPU:
+    \[
+      M_{\text{weights, TP}} \approx \frac{1}{k}\, M_{\text{weights}}.
+    \]
+    \item Однако, активации обычно не шардируются:
+    \[
+      M_{\text{act, TP}} \approx M_{\text{act}}.
+    \]
+    \item Итоговая память на GPU:
+    \[
+      M_{\text{TP}} \approx \frac{1}{k}\, M_{\text{weights}} + M_{\text{grad}} + M_{\text{opt}} + M_{\text{act}}.
+    \]
+    \item Коммуникационные затраты зависят от объёма активаций:
+    \[
+      C_{\text{TP}} \propto (k-1) \cdot M_{\text{act}}.
+    \]
+  \end{itemize}
+  \vspace{0.5cm}
+  \begin{flushright}
+    \tiny Источник: \url{https://arxiv.org/abs/1811.06965}
+  \end{flushright}
+\end{frame}
+
+\begin{frame}{Tensor Parallelism (TP)}
+  \begin{figure}
+    \centering
+    \includegraphics[width=0.5\textwidth]{tp.png}
+    \caption{Tensor Parallelism (TP)}
+    \label{fig:tp}
+  \end{figure}
+  \vspace{0.5cm}
+  \begin{flushright}
+    \tiny Источник: \url{https://colossalai.org/docs/concepts/paradigms_of_parallelism}
+  \end{flushright}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Pipeline Parallelism (PP)}
+  \begin{itemize}
+    \item Модель разделяется по слоям, распределяемым между GPU.
+    \item Каждый GPU хранит лишь часть весов и локальные активации:
+    \[
+      M_{\text{PP}} \approx M_{\text{local\_weights}} + M_{\text{local\_act}},
+    \]
+    где $M_{\text{local\_act}}$ определяется числом слоёв на этапе и размером батча.
+    \item Передача активаций между этапами порождает дополнительные коммуникационные затраты:
+    \[
+      C_{\text{PP}} \propto M_{\text{act}} \times (\text{число этапов}).
+    \]
+  \end{itemize}
+  \vspace{0.5cm}
+  \begin{flushright}
+    \tiny Источник: \url{https://arxiv.org/abs/1811.06965}
+  \end{flushright}
+\end{frame}
+
+\begin{frame}{Pipeline Parallelism (PP)}
+  \begin{figure}
+    \centering
+    \includegraphics[width=0.8\textwidth]{pp.png}
+    \caption{Pipeline Parallelism (PP)}
+    \label{fig:pp}
+  \end{figure}
+  \vspace{0.5cm}
+  \begin{flushright}
+    \tiny Источник: \url{https://colossalai.org/docs/concepts/paradigms_of_parallelism}
+  \end{flushright}
+\end{frame}
+
+\begin{frame}{Pipeline Parallelism (PP)}
+  \begin{figure}
+    \centering
+    \includegraphics[width=0.8\textwidth]{pp_bubble.png}
+    \caption{Pipeline Parallelism Bubble}
+    \label{fig:pp_bubble}
+  \end{figure}
+  \vspace{0.5cm}
+  \begin{flushright}
+    \tiny Источник: \url{https://arxiv.org/abs/1811.06965}
+  \end{flushright}
+\end{frame}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{ZERO и FSDP}
+
+\begin{frame}
+  \frametitle{Zero Redundancy Optimizer (ZeRO)}
+  \begin{itemize}
+    \item Шардирование оптимизаторных состояний между GPU:
+    \[
+      M_{\text{opt, ZeRO}} \approx \frac{1}{k}\, M_{\text{opt, full}}.
+    \]
+    \item Веса и активации остаются неразделёнными:
+    \[
+      M_{\text{weights, ZeRO}} \approx M_{\text{weights}}, \quad M_{\text{act, ZeRO}} \approx M_{\text{act}}.
+    \]
+    \item Итоговая память:
+    \[
+      M_{\text{ZeRO}} \approx M_{\text{weights}} + M_{\text{grad}} + \frac{1}{k}\, M_{\text{opt}} + M_{\text{act}}.
+    \]
+    \item Синхронизация шардированных оптимайзерных состояний.
+  \end{itemize}
+  \vspace{0.5cm}
+  \begin{flushright}
+    \tiny Источник: \url{https://arxiv.org/abs/2307.14045}
+  \end{flushright}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Fully Sharded Data Parallel (FSDP)}
+  \begin{itemize}
+    \item Шардирование весов, градиентов и состояний оптимайзера:
+    \[
+      M_{\text{FSDP}} \approx \frac{1}{k}\, \left( M_{\text{weights}} + M_{\text{grad}} + M_{\text{opt}} \right) + M_{\text{act}}.
+    \]
+    \item Активации остаются не шардированными (если не применяется чекпоинтинг), что часто является узким местом.
+    \item Дополнительные коммуникационные затраты для синхронизации шардированных данных.
+  \end{itemize}
+\end{frame}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\subsection{Context Parallel}
+
+\begin{frame}
+  \frametitle{Context Parallel (CP)}
+  \begin{itemize}
+    \item Метод направлен на распределение обработки длинного контекста.
+    \item Память для активаций может распределяться между устройствами:
+    \[
+      M_{\text{act, CP}} \approx \frac{1}{k}\, M_{\text{act}},
+    \]
+    \item Коммуникационные затраты связаны с передачей частей контекста:
+    \[
+      C_{\text{CP}} \propto M_{\text{act}} \times (\text{число разделов контекста}).
+    \]
+  \end{itemize}
+  \vspace{0.5cm}
+  \begin{flushright}
+    \tiny Источник: \url{https://arxiv.org/abs/2310.01889}
+  \end{flushright}
+\end{frame}
+
+\begin{frame}{Context Parallel (CP)}
+  \begin{figure}
+    \centering
+    \includegraphics[width=0.8\textwidth]{ring.png}
+    \caption{Ring Attention}
+    \label{fig:ring}
+  \end{figure}
+  \vspace{0.5cm}
+  \begin{flushright}
+    \tiny Источник: \url{https://coconut-mode.com/posts/ring-attention/}
+  \end{flushright}
+\end{frame}

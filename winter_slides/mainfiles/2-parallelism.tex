@@ -1,0 +1,85 @@
+%!TEX root = ../nauchka.tex
+
+\section{Распараллеливание верификации}
+
+\begin{frame}
+\frametitle{Текущее состояние: Data Parallelism}
+
+\begin{block}{AlphaBetaCROWN использует параллелизм по данным}
+Алгоритм Branch-and-Bound разбивает входное пространство на подзадачи, каждая решается на отдельном GPU
+\end{block}
+
+\vspace{0.5cm}
+
+\textbf{Ограничение:}
+\begin{itemize}
+    \item Решает проблему \textbf{времени вычислений}
+    \item НЕ решает проблему \textbf{памяти}
+    \item Если одна задача не влезает в память одного GPU --- верификация невозможна
+\end{itemize}
+
+\vspace{0.3cm}
+
+\begin{alertblock}{Необходимость модельного параллелизма}
+Нужно разделить саму модель и матрицы $A$ между GPU
+\end{alertblock}
+
+\end{frame}
+
+\begin{frame}
+\frametitle{Опыт из обучения моделей}
+
+\textbf{Три основных подхода к распределенному обучению:}
+
+\vspace{0.3cm}
+
+\begin{enumerate}
+    \item \textbf{Tensor Parallelism (TP)}
+    \begin{itemize}
+        \item Разделение матриц внутри слоя
+        \item Megatron-LM, широко используется для LLM
+    \end{itemize}
+
+    \item \textbf{Pipeline Parallelism (PP)}
+    \begin{itemize}
+        \item Разделение слоев модели по глубине
+        \item GPipe, используется для очень глубоких сетей
+    \end{itemize}
+
+    \item \textbf{Fully Sharded Data Parallelism (FSDP)}
+    \begin{itemize}
+        \item Шардирование параметров и оптимизатора
+        \item FSDP (PyTorch), ZeRO (DeepSpeed)
+    \end{itemize}
+\end{enumerate}
+
+\vspace{0.3cm}
+
+\textbf{Вопрос:} Какой подход применим к верификации?
+
+\end{frame}
+
+\begin{frame}
+\frametitle{Математика обратного распространения границ}
+
+\begin{block}{Ключевая операция CROWN}
+$$A_{prev} = A_{curr} \cdot W$$
+где $A$ --- матрица символьных границ, $W$ --- веса слоя
+\end{block}
+
+\vspace{0.3cm}
+
+\textbf{Для линейного слоя:}
+\begin{itemize}
+    \item $A_{curr}$: размер $(B \times S \times N_{out})$
+    \item $W$: размер $(N_{out} \times N_{in})$
+    \item $A_{prev}$: размер $(B \times S \times N_{in})$
+\end{itemize}
+
+\vspace{0.3cm}
+
+\begin{exampleblock}{Аналогия с обучением}
+Это похоже на обратное распространение, но вместо градиентов мы передаем \textbf{символьные матрицы границ}
+\end{exampleblock}
+
+\end{frame}
