@@ -168,15 +168,18 @@ def tp_shard_bounded_module(
 
 
 def _mark_sharded_zone(model: 'BoundedModule', linears, n_pairs):
-    """Mark nodes between each Col-Row pair as being in the TP sharded zone.
+    """Mark nodes between each Col-Row pair with a zone ID.
 
-    Nodes in the sharded zone have features split across ranks. CROWN backward
-    computations starting from these nodes should NOT use AllReduce because
-    they compute local (per-rank) bounds.
+    Each Col-Row pair defines a "sharded zone" where features are split
+    across ranks.  CROWN backward from a node in zone K should skip
+    AllReduce at the Col of zone K (because the computation is local),
+    but MUST still AllReduce at Col nodes of OTHER zones that the
+    backward path traverses.
     """
     for pair_idx in range(n_pairs):
         col_node = linears[pair_idx * 2]
         row_node = linears[pair_idx * 2 + 1]
+        zone_id = pair_idx
 
         # BFS from Col's outputs to find all nodes until Row (exclusive).
         visited = set()
@@ -185,7 +188,7 @@ def _mark_sharded_zone(model: 'BoundedModule', linears, n_pairs):
             if out_name != row_node.name:
                 queue.append(out_name)
         # Col itself is also in the sharded zone.
-        col_node._tp_in_sharded_zone = True
+        col_node._tp_sharded_zone_id = zone_id
         visited.add(col_node.name)
 
         while queue:
@@ -194,7 +197,7 @@ def _mark_sharded_zone(model: 'BoundedModule', linears, n_pairs):
                 continue
             visited.add(name)
             node = model[name]
-            node._tp_in_sharded_zone = True
+            node._tp_sharded_zone_id = zone_id
             for out_name in node.output_name:
                 if out_name != row_node.name:
                     queue.append(out_name)

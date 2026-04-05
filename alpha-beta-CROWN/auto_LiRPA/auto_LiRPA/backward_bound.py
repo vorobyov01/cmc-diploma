@@ -289,12 +289,12 @@ def backward_general(
     # local contribution). These must be AllReduced when the Col layer
     # is reached. See operators/tensor_parallel.py for the full design.
     _tp_active = _check_tp_active(self)
-    # Disable TP AllReduce when computing intermediate bounds for nodes
-    # in the sharded zone (between Col and Row).  These bounds are local
-    # per rank and must NOT be mixed via AllReduce.
-    if _tp_active and getattr(bound_node, '_tp_in_sharded_zone', False):
-        _tp_active = False
-        _tp_log(f"backward_general: DISABLED TP for sharded-zone node {bound_node.name}")
+    # When the start node is in a sharded zone, record its zone ID so
+    # that Col nodes in the SAME zone can skip AllReduce (local bounds).
+    # Col nodes in OTHER zones still AllReduce normally.
+    _tp_start_zone_id = getattr(bound_node, '_tp_sharded_zone_id', None) if _tp_active else None
+    if _tp_start_zone_id is not None:
+        _tp_log(f"backward_general: start_node {bound_node.name} in sharded zone {_tp_start_zone_id}")
     if _tp_active:
         _tp_in_partial = False
         _tp_partial_lb = torch.tensor(0., device=self.device)
@@ -529,6 +529,13 @@ def check_optimized_variable_sparsity(self: 'BoundedModule', node):
 def get_sparse_C(self: 'BoundedModule', node, ref_intermediate):
     (sparse_intermediate_bounds,
      ref_intermediate_lb, ref_intermediate_ub) = ref_intermediate
+
+    # Nodes in a TP sharded zone have per-rank local bounds.  Using sparse C
+    # based on those bounds would produce different K across ranks, causing
+    # NCCL shape mismatches if the backward path crosses other Col nodes.
+    if getattr(node, '_tp_sharded_zone_id', None) is not None:
+        sparse_intermediate_bounds = False
+
     sparse_conv_intermediate_bounds = self.bound_opts.get('sparse_conv_intermediate_bounds', False)
     minimum_sparsity = self.bound_opts.get('minimum_sparsity', 0.9)
     crown_batch_size = self.bound_opts.get('crown_batch_size', 1e9)

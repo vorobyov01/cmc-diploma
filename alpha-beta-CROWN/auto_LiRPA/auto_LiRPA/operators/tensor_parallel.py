@@ -114,12 +114,16 @@ class BoundLinearTP_Col(BoundLinear):
 
         self._refresh_dist_state()
 
-        # Skip AllReduce when start_node is in the sharded zone (between
-        # Col and Row).  Those backward passes compute LOCAL per-rank bounds
-        # and must not mix A matrices across ranks.
-        if start_node is not None and getattr(start_node, '_tp_in_sharded_zone', False):
+        # Skip AllReduce when start_node is in the SAME sharded zone as
+        # this Col.  Those backward passes compute LOCAL per-rank bounds
+        # and must not mix A matrices across ranks.  If start_node is in
+        # a DIFFERENT zone, AllReduce IS needed (the backward path crosses
+        # this Col-Row pair on its way to the input).
+        start_zone = getattr(start_node, '_tp_sharded_zone_id', None) if start_node is not None else None
+        my_zone = getattr(self, '_tp_sharded_zone_id', None)
+        if start_zone is not None and start_zone == my_zone:
             if _debug:
-                print(f"[TP rank={self.rank}] Col SKIP AllReduce (sharded-zone start_node={start_node.name})",
+                print(f"[TP rank={self.rank}] Col SKIP AllReduce (same zone={my_zone}, start_node={start_node.name})",
                       flush=True, file=sys.stderr)
             return result
 
