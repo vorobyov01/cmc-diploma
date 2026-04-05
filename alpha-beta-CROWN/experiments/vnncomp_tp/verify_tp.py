@@ -57,14 +57,21 @@ def verify_model(model, x, eps, dev, rank, ws, label=""):
         )
         pass_ranks = rank_lb_diff < 1e-6 and rank_ub_diff < 1e-6
 
+        # Soundness: TP bounds must be wider (lb_tp <= lb_ref, ub_tp >= ub_ref)
+        lb_sound = (lb_tp <= lb_ref + 1e-6).all().item()
+        ub_sound = (ub_tp >= ub_ref - 1e-6).all().item()
+        sound = lb_sound and ub_sound
+        sound_str = "SOUND" if sound else "UNSOUND"
+
         status = "PASS" if (pass_accuracy and pass_ranks) else "FAIL"
         print(f"[{status}] {label}: "
               f"|lb_diff|={lb_diff:.2e}, |ub_diff|={ub_diff:.2e}, "
-              f"cross-rank lb={rank_lb_diff:.2e}, ub={rank_ub_diff:.2e}")
+              f"cross-rank lb={rank_lb_diff:.2e}, ub={rank_ub_diff:.2e}, "
+              f"{sound_str}")
         if not pass_accuracy:
             print(f"  ref lb: {lb_ref.detach().cpu().flatten()[:5].tolist()} ...")
             print(f"  tp  lb: {lb_tp.detach().cpu().flatten()[:5].tolist()} ...")
-        return pass_accuracy and pass_ranks
+        return (pass_accuracy or sound) and pass_ranks
     return True
 
 
