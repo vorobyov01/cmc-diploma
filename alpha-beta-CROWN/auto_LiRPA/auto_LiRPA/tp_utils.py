@@ -187,8 +187,12 @@ def _mark_sharded_zone(model: 'BoundedModule', linears, n_pairs):
         for out_name in col_node.output_name:
             if out_name != row_node.name:
                 queue.append(out_name)
-        # Col itself is also in the sharded zone.
+        # Col itself is also in the sharded zone.  Force IBP for the Col
+        # node so that its intermediate bounds are computed locally (each
+        # rank independently bounds its own sharded features) rather than
+        # via CROWN backward that would incorrectly cross other zones.
         col_node._tp_sharded_zone_id = zone_id
+        col_node.ibp_intermediate = True
         visited.add(col_node.name)
 
         while queue:
