@@ -62,13 +62,13 @@ def measure_bounds(model, x, eps, dev, use_fsdp=False, ws=1, rank=0, method="CRO
 
 def run_experiment(model, x, eps, dev, rank, ws, label, method="CROWN"):
     """Run single-GPU and FSDP, compare bounds and memory."""
-    # Single GPU reference
-    lb_ref, ub_ref, peak_single, base_single = measure_bounds(
-        model, x, eps, dev, use_fsdp=False, ws=1, rank=0, method=method)
-
-    # FSDP
+    # FSDP first (runs on clean GPU, no prior allocation residue)
     lb_fsdp, ub_fsdp, peak_fsdp, base_fsdp = measure_bounds(
         model, x, eps, dev, use_fsdp=True, ws=ws, rank=rank, method=method)
+
+    # Single GPU reference (runs after FSDP, but that's OK for correctness)
+    lb_ref, ub_ref, peak_single, base_single = measure_bounds(
+        model, x, eps, dev, use_fsdp=False, ws=1, rank=0, method=method)
 
     # Cross-rank consistency
     lb_all = [torch.zeros_like(lb_fsdp) for _ in range(ws)]
