@@ -1,7 +1,7 @@
 model:
-  onnx_path: ../vnncomp_tp/models/mnist-net_256x6.onnx
+  onnx_path: ../experiments/vnncomp_tp/models/mnist-net_256x6.onnx
 specification:
-  vnnlib_path: ../vnncomp_tp/vnnlib/prop_0_0.03.vnnlib
+  vnnlib_path: ../experiments/vnncomp_tp/vnnlib/prop_0_0.03.vnnlib
 solver:
   batch_size: 2048
   bound_prop_method: alpha-crown
