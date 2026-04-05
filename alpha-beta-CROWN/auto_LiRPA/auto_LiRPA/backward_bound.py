@@ -24,9 +24,63 @@ from .utils import *
 from .bound_ops import *
 import warnings
 
+import torch.distributed as _dist
+
 from typing import TYPE_CHECKING, List
 if TYPE_CHECKING:
     from .bound_general import BoundedModule
+
+
+def _check_tp_active(model: 'BoundedModule') -> bool:
+    """Return True if TP nodes exist and distributed is initialized with ws>1."""
+    if not hasattr(model, '_tp_active_cached'):
+        model._tp_active_cached = False
+        if (_dist.is_available() and _dist.is_initialized()
+                and _dist.get_world_size() > 1):
+            from .operators.tensor_parallel import (
+                BoundLinearTP_Col, BoundLinearTP_Row)
+            model._tp_active_cached = any(
+                isinstance(n, (BoundLinearTP_Col, BoundLinearTP_Row))
+                for n in model.nodes())
+    return model._tp_active_cached
+
+
+def _tp_accumulate_bias(node, lower_b, upper_b, lb, ub,
+                        in_partial, partial_lb, partial_ub):
+    """TP-aware bias accumulation in the CROWN backward loop.
+
+    Returns (lb, ub, in_partial, partial_lb, partial_ub).
+    """
+    from .operators.tensor_parallel import (
+        BoundLinearTP_Col, BoundLinearTP_Row, DifferentiableAllReduce)
+
+    if isinstance(node, BoundLinearTP_Col):
+        # Col's bias is partial. Accumulate it, then AllReduce all
+        # partial biases collected since the last Row layer.
+        partial_lb = partial_lb + lower_b
+        partial_ub = partial_ub + upper_b
+        if isinstance(partial_lb, torch.Tensor) and partial_lb.numel() > 1:
+            partial_lb = DifferentiableAllReduce.apply(partial_lb.contiguous())
+        if isinstance(partial_ub, torch.Tensor) and partial_ub.numel() > 1:
+            partial_ub = DifferentiableAllReduce.apply(partial_ub.contiguous())
+        lb = lb + partial_lb
+        ub = ub + partial_ub
+        partial_lb = torch.tensor(0., device=lb.device)
+        partial_ub = torch.tensor(0., device=ub.device)
+        in_partial = False
+    elif in_partial:
+        # Between Row and Col: biases are partial.
+        partial_lb = partial_lb + lower_b
+        partial_ub = partial_ub + upper_b
+    else:
+        # Full bias (before any Row, or between Col and Row).
+        lb = lb + lower_b
+        ub = ub + upper_b
+
+    if isinstance(node, BoundLinearTP_Row):
+        in_partial = True
+
+    return lb, ub, in_partial, partial_lb, partial_ub
 
 
 def batched_backward(self: 'BoundedModule', node, C, unstable_idx, batch_size,
@@ -217,6 +271,16 @@ def backward_general(
     else:
         ub = initial_ub
 
+    # Tensor Parallelism bias tracking. In TP mode, biases from layers
+    # between a Row and Col layer are "partial" (each rank has only its
+    # local contribution). These must be AllReduced when the Col layer
+    # is reached. See operators/tensor_parallel.py for the full design.
+    _tp_active = _check_tp_active(self)
+    if _tp_active:
+        _tp_in_partial = False
+        _tp_partial_lb = torch.tensor(0., device=self.device)
+        _tp_partial_ub = torch.tensor(0., device=self.device)
+
     # Save intermediate layer A matrices when required.
     A_record = {}
 
@@ -292,8 +356,14 @@ def backward_general(
                     print(l, time_elapsed)
             if lb.ndim > 0 and type(lower_b) == Tensor and self.conv_mode == 'patches':
                 lb, ub, lower_b, upper_b = check_patch_biases(lb, ub, lower_b, upper_b)
-            lb = lb + lower_b
-            ub = ub + upper_b
+            if _tp_active:
+                lb, ub, _tp_in_partial, _tp_partial_lb, _tp_partial_ub = (
+                    _tp_accumulate_bias(
+                        l, lower_b, upper_b, lb, ub,
+                        _tp_in_partial, _tp_partial_lb, _tp_partial_ub))
+            else:
+                lb = lb + lower_b
+                ub = ub + upper_b
             if self.return_A and self.needed_A_dict and bound_node.name in self.needed_A_dict:
                 # FIXME remove [0][0] and [0][1]?
                 if len(self.needed_A_dict[bound_node.name]) == 0 or l.name in self.needed_A_dict[bound_node.name]:
@@ -325,6 +395,17 @@ def backward_general(
 
             for i, l_pre in enumerate(l.inputs):
                 add_bound(l, l_pre, lA=A[i][0], uA=A[i][1])
+
+    # Flush remaining partial biases (defensive; normally the last layer
+    # processed is a Col which already flushes, but handle edge cases).
+    if _tp_active and _tp_in_partial:
+        from .operators.tensor_parallel import DifferentiableAllReduce
+        if isinstance(_tp_partial_lb, torch.Tensor) and _tp_partial_lb.numel() > 1:
+            _tp_partial_lb = DifferentiableAllReduce.apply(_tp_partial_lb.contiguous())
+        if isinstance(_tp_partial_ub, torch.Tensor) and _tp_partial_ub.numel() > 1:
+            _tp_partial_ub = DifferentiableAllReduce.apply(_tp_partial_ub.contiguous())
+        lb = lb + _tp_partial_lb
+        ub = ub + _tp_partial_ub
 
     if lb.ndim >= 2:
         lb = lb.transpose(0, 1)

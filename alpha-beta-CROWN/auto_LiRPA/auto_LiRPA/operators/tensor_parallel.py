@@ -10,6 +10,16 @@ Key design:
     so that α-CROWN gradient optimization works correctly through the TP layer.
   - Forward of AllReduce = SUM across ranks.
   - Backward of AllReduce = identity (∂(Σ x_r)/∂x_r = 1).
+
+Bias handling strategy for CROWN backward:
+  In the CROWN backward loop, biases accumulate from all layers. With TP, some
+  biases are "full" (same on all ranks) and some are "partial" (different per
+  rank, needs AllReduce). Rather than AllReducing biases inside each operator,
+  we use a coordinated approach:
+    - Col backward: AllReduce A matrices only (NOT biases)
+    - Row backward: divide bias by world_size (to make it "partial")
+    - backward_general loop: track partial vs full bias, AllReduce partial
+      biases when a Col layer is reached (see backward_bound.py)
 """
 import torch
 import torch.distributed as dist
@@ -48,6 +58,20 @@ def _tp_all_reduce(value):
                 item = DifferentiableAllReduce.apply(item.contiguous())
             items.append(item)
         return type(value)(items)
+    return value
+
+
+def _scale_bias(value, scale):
+    """Divide a bias value (tensor, tuple, or float) by a scalar."""
+    if isinstance(value, torch.Tensor):
+        return value / scale
+    if isinstance(value, (tuple, list)):
+        return type(value)(
+            x / scale if isinstance(x, torch.Tensor) else x
+            for x in value
+        )
+    if isinstance(value, (int, float)) and value != 0:
+        return value / scale
     return value
 
 
@@ -90,7 +114,6 @@ class BoundLinearTP_Col(BoundLinear):
 
         if self.use_tp and self.world_size > 1:
             lA_x, uA_x = result[0][0]
-            lbias, ubias = result[1], result[2]
 
             if lA_x is not None and isinstance(lA_x, torch.Tensor):
                 lA_x = DifferentiableAllReduce.apply(lA_x.contiguous())
@@ -98,9 +121,10 @@ class BoundLinearTP_Col(BoundLinear):
                 uA_x = DifferentiableAllReduce.apply(uA_x.contiguous())
 
             result[0][0] = (lA_x, uA_x)
-            lbias = _tp_all_reduce(lbias)
-            ubias = _tp_all_reduce(ubias)
-            result = (result[0], lbias, ubias)
+            # Biases are NOT AllReduced here. They are handled by the TP bias
+            # tracking in backward_general (backward_bound.py). Col's biases
+            # are partial and will be AllReduced together with intermediate
+            # layer biases (e.g., ReLU relaxation) at the right time.
 
         return result
 
@@ -133,19 +157,46 @@ class BoundLinearTP_Row(BoundLinear):
 
     def forward(self, x, w, b=None):
         self._refresh_dist_state()
-        output = super().forward(x, w, b)
-        if self.use_tp and self.world_size > 1 and isinstance(output, torch.Tensor):
-            output = DifferentiableAllReduce.apply(output.contiguous())
-        return output
+        # Megatron-LM pattern: matmul → AllReduce → add bias.
+        # super().forward with b=None computes x @ w^T only.
+        res = super().forward(x, w, None)
+        if self.use_tp and self.world_size > 1 and isinstance(res, torch.Tensor):
+            res = DifferentiableAllReduce.apply(res.contiguous())
+        if b is not None:
+            if self.beta_linear != 1.0:
+                b = self.beta_linear * b
+            res = res + b
+        return res
 
     def interval_propagate(self, *v, C=None, w=None):
         self._refresh_dist_state()
-        lower, upper = super().interval_propagate(*v, C=C, w=w)
-        if self.use_tp and self.world_size > 1:
-            if isinstance(lower, torch.Tensor):
-                lower = DifferentiableAllReduce.apply(lower.contiguous())
-            if isinstance(upper, torch.Tensor):
-                upper = DifferentiableAllReduce.apply(upper.contiguous())
+        if not (self.use_tp and self.world_size > 1):
+            return super().interval_propagate(*v, C=C, w=w)
+
+        has_bias = len(v) >= 3
+
+        # Compute IBP without bias so AllReduce doesn't overcount it.
+        lower, upper = super().interval_propagate(
+            *(v[:2] if has_bias else v), C=C, w=w)
+
+        if isinstance(lower, torch.Tensor):
+            lower = DifferentiableAllReduce.apply(lower.contiguous())
+        if isinstance(upper, torch.Tensor):
+            upper = DifferentiableAllReduce.apply(upper.contiguous())
+
+        if has_bias:
+            bias_lb, bias_ub = v[2][0], v[2][1]
+            if self.beta_linear != 1.0:
+                bias_lb = self.beta_linear * bias_lb
+                bias_ub = self.beta_linear * bias_ub
+            if C is not None:
+                if isinstance(bias_lb, torch.Tensor):
+                    bias_lb = C.matmul(bias_lb)
+                if isinstance(bias_ub, torch.Tensor):
+                    bias_ub = C.matmul(bias_ub)
+            lower = lower + bias_lb
+            upper = upper + bias_ub
+
         return lower, upper
 
     def bound_backward(self, last_lA, last_uA, *x, start_node=None,
@@ -153,4 +204,11 @@ class BoundLinearTP_Row(BoundLinear):
         self._refresh_dist_state()
         result = super().bound_backward(last_lA, last_uA, *x, start_node=start_node,
                                         reduce_bias=reduce_bias, **kwargs)
+        if self.use_tp and self.world_size > 1:
+            # Row's bias is "full" (same on all ranks because A is full here).
+            # Divide by world_size so that AllReduce in backward_general gives
+            # the correct total: sum(bias/ws) = bias.
+            lbias = _scale_bias(result[1], self.world_size)
+            ubias = _scale_bias(result[2], self.world_size)
+            result = (result[0], lbias, ubias)
         return result

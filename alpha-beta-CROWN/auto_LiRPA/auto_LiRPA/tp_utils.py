@@ -86,6 +86,8 @@ def tp_shard_bounded_module(
     if world_size <= 1:
         return []
 
+    model._tp_active_cached = True
+
     topo = _topological_order(model)
     linears = [n for n in topo if type(n) is BoundLinear]
 
