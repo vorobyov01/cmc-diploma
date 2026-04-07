@@ -32,6 +32,13 @@ class BoundAdd(Bound):
     def forward(self, x, y):
         self.x_shape = x.shape
         self.y_shape = y.shape
+        if x.shape != y.shape:
+            try:
+                torch.broadcast_shapes(x.shape, y.shape)
+            except RuntimeError:
+                import traceback
+                print(f"[DEBUG BoundAdd] shape mismatch: x={x.shape} y={y.shape} name={self.name}")
+                traceback.print_stack(limit=5)
         return x + y
 
     def bound_backward(self, last_lA, last_uA, x, y, **kwargs):
