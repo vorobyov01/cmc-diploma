@@ -141,9 +141,15 @@ def split_domain(net: LiRPANet, domains, d, batch, stats=None,
         _rank = _dist.get_rank()
         _ws = _dist.get_world_size()
         d_local = scatter_domain_dict(d, _rank, _ws)
+        # With FSDP, all ranks must iterate the same number of times in
+        # CROWN-optimized to avoid deadlocking on AllGather.  Disable
+        # early-exit mechanisms so every rank runs the full iteration count.
+        net.net.set_bound_opts({'optimize_bound_args': {
+            'early_stop_patience': int(1e9),
+        }})
         ret_local = net.update_bounds(
             d_local, fix_interm_bounds=fix_interm_bounds,
-            stop_criterion_func=stop_func(d_local['thresholds']),
+            stop_criterion_func=lambda x: False,
             multi_spec_keep_func=multi_spec_keep_func_all,
             beta_bias=branching_points is not None,
             enable_clip_domains=enable_clip_domains,
@@ -531,10 +537,13 @@ def general_bab(net: LiRPANet, x, c, rhs,
             stats, start_time, initial_bs_ratio)  # pylint: disable=used-before-assignment
 
     num_domains = len(domains)
+    import torch.distributed as _dist
+    _dp_active = _dist.is_initialized() and _dist.get_world_size() > 1
     vram_ratio = 0.85 if cut_enabled else 0.9
     auto_batch_size = AutoBatchSize(
         batch, net.device, vram_ratio,
-        enable=arguments.Config['solver']['auto_enlarge_batch_size'])
+        enable=(arguments.Config['solver']['auto_enlarge_batch_size']
+                and not _dp_active))
 
     total_round = 0
     result = None
