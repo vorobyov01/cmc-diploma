@@ -1,5 +1,141 @@
 # Changelog
 
+## 2026-04-07 — Domain-Parallel BaB: полная верификация на нескольких GPU
+
+### Что сделано
+
+Реализован Domain-Parallel Branch-and-Bound: каждый GPU обрабатывает свою порцию доменов при BaB-верификации, а веса остаются шардированными через FSDP. Это даёт как ускорение (каждый GPU считает batch/N доменов), так и экономию памяти (A-матрицы и промежуточные тензоры пропорциональны batch/N, веса шардированы).
+
+### Новые файлы
+
+| Файл | Описание |
+|------|----------|
+| `complete_verifier/bab_parallel.py` | scatter_domain_dict, gather_result_dict, pickle-based GPU list gathering |
+| `experiments/fsdp_crown/mnist_fc_bab_hard.yaml` | YAML-конфиг для BaB с eps=0.05 (долгая задача для тестирования) |
+
+### Изменённые файлы
+
+| Файл | Изменение |
+|------|-----------|
+| `complete_verifier/bab.py` | Интеграция DP в `split_domain`: scatter перед `update_bounds`, gather после; отключение `stop_criterion` и `early_stop_patience` при DP для предотвращения FSDP deadlock; отключение `auto_batch_size` при DP для синхронизации очередей доменов |
+
+### Архитектура Domain-Parallel BaB
+
+```
+1. [все ranks]  pick_out(batch=B) — одинаковые домены на всех GPU
+2. [все ranks]  branching + build_history → 2B child-доменов
+3. [scatter]    d_local = scatter_domain_dict(d, rank, ws) — каждый получает B/ws
+4. [каждый]     ret_local = net.update_bounds(d_local) — compute_bounds на batch/ws
+5. [gather]     ret = gather_result_dict(ret_local, ws) — AllGather обратно
+6. [все ranks]  domains.add(ret, d) — одинаковые очереди на всех GPU
+```
+
+Ключевые решения:
+- **Anti-deadlock**: `stop_criterion_func=lambda x: False` + `early_stop_patience=1e9` при DP, чтобы все ranks выполняли одинаковое число итераций CROWN-optimized (иначе один rank выходит раньше → deadlock на FSDP AllGather)
+- **NCCL-only**: `_gather_list` сериализует Python-объекты (betas, split_history) через pickle → GPU byte tensors → NCCL AllGather (т.к. `all_gather_object` требует gloo backend)
+- **Cross-device safety**: тензоры перемещаются на CPU перед pickle и обратно на local CUDA после unpickle
+
+### Результаты
+
+**mnist-net_256x6, eps=0.05, BaB timeout=120s:**
+
+| Конфигурация | Batch | Peak GPU    | BaB rounds | Domains  |
+|--------------|-------|-------------|------------|----------|
+| Single GPU   | 4096  | 24,130 MB   | 11         | 393,952  |
+| DP=2 + FSDP  | 4096  | 6,372 MB    | 14         | —        |
+| Single GPU   | 512   | 6,046 MB    | 11         | 65,628   |
+| DP=2 + FSDP  | 512   | 226 MB      | 24         | 20,572   |
+
+Экономия памяти: **~4× при batch=4096**, **~27× при batch=512** (каждый GPU хранит A-матрицы только для batch/N доменов + FSDP шардирует веса).
+
+### Ограничения
+
+- Тестировалось только на 2 GPU (архитектурно поддерживает N GPU)
+- Только MLP (mnist-net_256x6), activation split branching
+- Не тестировался случай `safe` (только timeout)
+
+## 2026-04-05 — Реализация FSDP для верификации нейронных сетей
+
+### Что сделано
+
+Реализован Fully Sharded Data Parallelism (FSDP) для bound propagation в auto_LiRPA — альтернатива Tensor Parallelism, дающая побитово идентичные bounds при значительной экономии памяти.
+
+### Новые файлы
+
+| Файл | Описание |
+|------|----------|
+| `auto_LiRPA/auto_LiRPA/fsdp_utils.py` | Утилиты FSDP: шардирование, послойный AllGather/free |
+| `experiments/fsdp_crown/verify_fsdp.py` | Тест корректности FSDP bounds |
+| `experiments/fsdp_crown/memory_experiment.py` | Эксперимент: сравнение памяти single vs FSDP |
+| `experiments/fsdp_crown/run_abcrown_fsdp.py` | Обёртка для запуска abcrown через torchrun с FSDP |
+| `experiments/fsdp_crown/mnist_256x6.yaml` | YAML-конфиг для abcrown (ONNX + VNNLIB) |
+
+### Изменённые файлы
+
+| Файл | Изменение |
+|------|-----------|
+| `auto_LiRPA/backward_bound.py` | FSDP hooks: fsdp_gather_node перед BoundLinear.bound_backward, fsdp_free_node после |
+| `auto_LiRPA/interval_bound.py` | FSDP hooks: fsdp_free_node после interval_propagate для BoundLinear |
+| `complete_verifier/beta_CROWN_solver.py` | Auto-FSDP hook в LiRPANet.__init__: шардирование при dist.is_initialized() |
+
+### Архитектура FSDP
+
+1. **fsdp_shard_bounded_module** — обходит граф BoundedModule, шардирует BoundParams (веса линейных слоёв) по dim=0
+2. **fsdp_gather_node** — AllGather для одного BoundParams перед использованием слоя
+3. **fsdp_free_node** — освобождение полной матрицы после использования (остаётся только шард)
+4. В каждый момент времени в GPU-памяти находится не более одной полной весовой матрицы
+
+### Результаты экспериментов
+
+**Корректность (8 тестов, IBP + CROWN, PyTorch + ONNX):**
+Все тесты PASS, lb_diff = ub_diff = 0.00 (побитово идентичны single-GPU).
+
+**Память (baseline = хранение весов, peak = во время compute_bounds):**
+
+| Модель | Baseline savings | Peak savings |
+|--------|-----------------|--------------|
+| MLP h=256, d=4 | 57% | — (overhead > savings) |
+| MLP h=1024, d=4 | 79% | — |
+| MLP h=4096, d=4 | 82% | 34% |
+| MLP h=8192, d=4 | 82% | 34% |
+| MLP h=4096, d=8 | 90% | 39% |
+
+### Сравнение TP vs FSDP
+
+| Свойство | TP | FSDP |
+|----------|----|----|
+| Peak memory savings | ~2× | 1.3–1.4× |
+| Точность bounds | Потеря (IBP fallback) | Побитово идентичны |
+| Совместимость с β-CROWN | Сложно (зоны, β-координация) | Просто (граф не меняется) |
+| Объём реализации | ~500 строк | ~100 строк |
+
+### Обновление текста диплома
+
+- Переписан раздел 5 «Применение параллелизма к верификации»: FSDP теперь как полноценный метод, сравнение TP vs FSDP, теоретический анализ памяти
+- Добавлены эксперименты 4 (корректность FSDP) и 5 (память FSDP) в раздел 6
+- Обновлено заключение (раздел 7): два подхода, компромисс память-точность, FSDP как путь к полной верификации
+
+## 2026-04-05 — Корректность и звуковость TP bounds на VNN-COMP моделях
+
+### Что сделано
+
+Реализовано зонирование шардированных подграфов для корректного CROWN backward через несколько TP-зон. Добавлен тест корректности на VNN-COMP ONNX-моделях (MNIST-FC 256×2, 256×4, 256×6).
+
+### Ключевые изменения
+
+- `_mark_sharded_zone` в `tp_utils.py`: BFS-разметка зон между Col–Row парами
+- `BoundLinearTP_Col.bound_backward`: пропуск AllReduce если start_node в той же зоне
+- `_tp_accumulate_bias` в `backward_bound.py`: зоно-зависимый skip DifferentiableAllReduce
+- `get_sparse_C`: force `sparse_intermediate_bounds = False` для узлов в зонах
+- `ibp_intermediate = True` для BoundLinearTP_Col (IBP для промежуточных bounds в зонах)
+
+### Результаты
+
+- 256×2 (1 пара): |lb_diff| = 3e-8 (машинная точность)
+- 256×4 (2 пары): |lb_diff| = 2.5, SOUND (IBP fallback теряет точность)
+- 256×6 (3 пары): |lb_diff| = 792, SOUND
+- Кросс-ранговая согласованность: 0.00 для всех моделей
+
 ## 2026-04-05 — Исправление OOM и contiguous-ошибки в TP bound propagation
 
 ### Контекст
