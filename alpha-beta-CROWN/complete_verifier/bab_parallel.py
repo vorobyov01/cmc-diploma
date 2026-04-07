@@ -6,6 +6,8 @@ Combined with FSDP weight sharding, this gives both memory savings
 and ~Nx speedup.
 """
 
+import pickle
+
 import torch
 import torch.distributed as dist
 
@@ -126,10 +128,28 @@ def _gather_tensor_dict(td, world_size, cat_dim=0):
 
 
 def _gather_list(lst, world_size):
-    """AllGather a Python list across all ranks."""
-    gathered = [None] * world_size
-    dist.all_gather_object(gathered, lst)
+    """AllGather a Python list across ranks via pickled GPU byte tensors.
+
+    Avoids all_gather_object which requires a gloo backend.
+    """
+    data = pickle.dumps(lst)
+    size = len(data)
+    device = torch.device("cuda")
+
+    size_t = torch.tensor([size], dtype=torch.long, device=device)
+    all_sizes = [torch.zeros(1, dtype=torch.long, device=device)
+                 for _ in range(world_size)]
+    dist.all_gather(all_sizes, size_t)
+    max_size = max(s.item() for s in all_sizes)
+
+    buf = torch.zeros(max_size, dtype=torch.uint8, device=device)
+    buf[:size] = torch.frombuffer(bytearray(data), dtype=torch.uint8).to(device)
+    all_bufs = [torch.zeros(max_size, dtype=torch.uint8, device=device)
+                for _ in range(world_size)]
+    dist.all_gather(all_bufs, buf)
+
     result = []
-    for part in gathered:
+    for b, sz in zip(all_bufs, all_sizes):
+        part = pickle.loads(bytes(b[:int(sz.item())].cpu().numpy()))
         result.extend(part)
     return result

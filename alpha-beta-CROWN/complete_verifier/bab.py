@@ -94,15 +94,6 @@ def split_domain(net: LiRPANet, domains, d, batch, stats=None,
             branching_candidates=max(branch_args['candidates'], split_depth),
             branching_reduceop=branch_args['reduceop']))
 
-    # With domain-parallel BaB, ranks may have diverged net state after
-    # update_bounds on different domain slices.  Broadcast rank 0's
-    # branching decisions to guarantee all ranks split identically.
-    import torch.distributed as _dist
-    if _dist.is_initialized() and _dist.get_world_size() > 1:
-        _bcast = [branching_decision, branching_points, split_depth]
-        _dist.broadcast_object_list(_bcast, src=0)
-        branching_decision, branching_points, split_depth = _bcast
-
     if len(branching_decision) < len(next(iter(d['mask'].values()))):
         print('all nodes are split!!')
         print(f'{stats.visited} domains visited')
