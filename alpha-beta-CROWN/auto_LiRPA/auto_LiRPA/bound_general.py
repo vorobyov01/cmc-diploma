@@ -456,8 +456,6 @@ class BoundedModule(nn.Module):
     def get_forward_value(self, node):
         """ Recursively get `forward_value` for `node` and its parent nodes"""
         if getattr(node, 'forward_value', None) is not None:
-            if type(node).__name__ == 'BoundShape':
-                print(f"[DBG CACHED] BoundShape name={node.name} fv={node.forward_value}")
             return node.forward_value
         inputs = [self.get_forward_value(inp) for inp in node.inputs]
         for inp in node.inputs:
@@ -466,10 +464,9 @@ class BoundedModule(nn.Module):
         fv = node.forward(*inputs)
         if isinstance(fv, (torch.Size, tuple)):
             fv = torch.tensor(fv, device=self.device)
-        _dbg_types = ('BoundShape', 'BoundReshape', 'BoundConstantOfShape', 'BoundConv')
-        if type(node).__name__ in _dbg_types:
-            in_shapes = [getattr(i, 'shape', '?') for i in inputs]
-            print(f"[DBG] {type(node).__name__} name={node.name} in_shapes={in_shapes} out={fv.shape if hasattr(fv,'shape') else fv}")
+        if type(node).__name__ == 'BoundReshape' and node.name == '/162':
+            inp_names = [n.name for n in node.inputs]
+            print(f"[DBG /162] target input node={inp_names[1]} type={type(node.inputs[1]).__name__} from_input={node.inputs[1].from_input} target_val={inputs[1]}")
         node.forward_value = fv
         node.output_shape = fv.shape
         # In most cases, the batch dimension is just the first dimension
