@@ -139,12 +139,12 @@ def split_domain(net: LiRPANet, domains, d, batch, stats=None,
     if _dp_active:
         # With FSDP, all ranks must iterate the same number of times in
         # CROWN-optimized to avoid deadlocking on AllGather.  Disable
-        # early-exit mechanisms so every rank runs the full iteration count.
+        # early-exit mechanisms and pruning_in_iteration (which can reduce
+        # the batch to 0 and cause reshape errors).
         net.net.set_bound_opts({'optimize_bound_args': {
             'early_stop_patience': int(1e9),
+            'pruning_in_iteration': False,
         }})
-        # All ranks process the full batch (no domain scatter).
-        # FSDP shards only the weight storage; computation is replicated.
         ret = net.update_bounds(
             d, fix_interm_bounds=fix_interm_bounds,
             stop_criterion_func=lambda x: False,
