@@ -1,0 +1,37 @@
+%!TEX root = ../nauchka.tex
+
+\section{Заключение}
+
+\begin{frame}
+\frametitle{Результаты работы}
+
+\begin{enumerate}
+    \item \textbf{Tensor Parallelism:} линейное снижение пиковой памяти ($\approx 2\times$ при $P{=}2$), но потеря точности bounds для глубоких моделей (IBP fallback)
+
+    \item \textbf{FSDP:} побитово идентичные bounds, экономия baseline-памяти 80--90\%, пиковой 34--39\%
+
+    \item \textbf{Автоматическое шардирование:} обе функции работают с произвольными \texttt{BoundedModule}, включая ONNX-модели VNN-COMP
+
+    \item \textbf{Теоретический анализ:} формальная модель $M_{\text{peak}}^{\text{FSDP}} = h^2(d/P + 1 + C)$ подтверждена экспериментально
+\end{enumerate}
+
+\end{frame}
+
+\begin{frame}
+\frametitle{Направления дальнейшей работы}
+
+\begin{block}{Полная верификация через FSDP}
+FSDP не изменяет вычислительный граф $\Rightarrow$ совместим с $\beta$-CROWN и Branch-and-Bound. Требуется распараллеливание управляющей логики BaB.
+\end{block}
+
+\vspace{0.3cm}
+
+\begin{block}{Расширения}
+\begin{itemize}
+    \item Поддержка свёрточных слоёв (\texttt{BoundConv})
+    \item Масштабирование на $P = 4, 8$ GPU
+    \item Оптимизация $\alpha$-CROWN с TP и FSDP
+\end{itemize}
+\end{block}
+
+\end{frame}

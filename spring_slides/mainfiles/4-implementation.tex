@@ -1,0 +1,99 @@
+%!TEX root = ../nauchka.tex
+
+\section{Реализация}
+
+\begin{frame}
+\frametitle{Архитектура auto\_LiRPA}
+
+\begin{block}{auto\_LiRPA}
+Библиотека для автоматического вычисления границ (Linear Relaxation based Perturbation Analysis)
+\end{block}
+
+\vspace{0.3cm}
+
+\textbf{Ключевые компоненты:}
+\begin{itemize}
+    \item \texttt{BoundedModule} --- обёртка над PyTorch/ONNX моделью
+    \item \texttt{Bound}-операторы для каждого типа слоя
+    \item Методы \texttt{bound\_backward} (CROWN) и \texttt{IBP\_general} (IBP)
+\end{itemize}
+
+\end{frame}
+
+\begin{frame}
+\frametitle{Реализация TP: операторы и шардирование}
+
+\textbf{Компоненты TP ($\sim$500 строк):}
+
+\begin{enumerate}
+    \item \texttt{BoundLinearTP\_Col} / \texttt{BoundLinearTP\_Row}
+    \begin{itemize}
+        \item Наследуют от \texttt{BoundLinear}, добавляют \texttt{AllReduce} в backward
+        \item ONNX-интеграция через \texttt{torch.autograd.Function}
+    \end{itemize}
+
+    \item \texttt{tp\_shard\_bounded\_module}
+    \begin{itemize}
+        \item Автоматическое шардирование произвольного \texttt{BoundedModule}
+        \item Замена чередующихся пар \texttt{BoundLinear} на Col/Row
+        \item Зонирование подграфов для промежуточных bounds
+    \end{itemize}
+\end{enumerate}
+
+\end{frame}
+
+\begin{frame}
+\frametitle{Реализация FSDP: послойный AllGather}
+
+\textbf{Компоненты FSDP ($\sim$100 строк):}
+
+\begin{enumerate}
+    \item \texttt{fsdp\_shard\_bounded\_module}
+    \begin{itemize}
+        \item Шардирование \texttt{BoundParams} (веса): $W \to W^{(r)} \in \mathbb{R}^{(k/P) \times n}$
+    \end{itemize}
+
+    \item Прозрачный \texttt{AllGather} в \texttt{BoundParams.forward()}
+    \begin{itemize}
+        \item Полная матрица собирается и возвращается как результат forward
+    \end{itemize}
+
+    \item Хуки \texttt{fsdp\_gather\_node} / \texttt{fsdp\_free\_node}
+    \begin{itemize}
+        \item Интегрированы в CROWN backward и IBP forward
+        \item В каждый момент в памяти $\leq 1$ полной матрицы (помимо шардов)
+    \end{itemize}
+\end{enumerate}
+
+\vspace{0.3cm}
+
+\begin{exampleblock}{Ключевое отличие от TP}
+Не создаются новые операторы, не изменяется вычислительный граф, не вводятся шардированные зоны
+\end{exampleblock}
+
+\end{frame}
+
+\begin{frame}
+\frametitle{Статус реализации}
+
+\begin{block}{Tensor Parallelism}
+\begin{itemize}
+    \item[\checkmark] Операторы \texttt{BoundLinearTP\_Col/Row} с ONNX-интеграцией
+    \item[\checkmark] Автоматическое шардирование (PyTorch и ONNX модели)
+    \item[\checkmark] Зонирование подграфов, IBP fallback
+    \item[\checkmark] Эксперименты: память, корректность, VNN-COMP
+\end{itemize}
+\end{block}
+
+\vspace{0.2cm}
+
+\begin{block}{FSDP}
+\begin{itemize}
+    \item[\checkmark] Шардирование весов с послойным AllGather/Free
+    \item[\checkmark] Поддержка IBP и CROWN
+    \item[\checkmark] Побитово идентичные bounds для всех моделей
+    \item[\checkmark] Эксперименты: корректность, память
+\end{itemize}
+\end{block}
+
+\end{frame}

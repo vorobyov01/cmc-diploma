@@ -1,0 +1,219 @@
+%!TEX root = ../nauchka.tex
+
+\section{Эксперименты}
+
+\begin{frame}
+\frametitle{Аппаратная конфигурация и план}
+
+\textbf{Аппаратура:} 2$\times$ NVIDIA A40 (48~ГБ), NVLink, NCCL, PyTorch~2.x
+
+\vspace{0.3cm}
+
+\textbf{5 групп экспериментов:}
+\begin{enumerate}
+    \item TP: потребление GPU-памяти (OOM-тест)
+    \item TP: корректность и soundness bounds
+    \item TP: автоматическое шардирование моделей VNN-COMP
+    \item FSDP: корректность bounds
+    \item FSDP: потребление GPU-памяти
+\end{enumerate}
+
+\end{frame}
+
+\begin{frame}
+\frametitle{Эксперимент 1: TP --- потребление памяти}
+
+\textbf{Модель:} MLP, $D{=}4096$, $H{=}262144$, batch$=$2048, CROWN, $\varepsilon{=}0.01$
+
+\vspace{0.3cm}
+
+\begin{table}[h]
+\centering
+\scriptsize
+\begin{tabular}{lccc}
+\hline
+\textbf{Режим} & \textbf{GPU} & \textbf{max\_allocated, МБ} & \textbf{max\_reserved, МБ} \\
+\hline
+Single GPU & 1$\times$A40 & 26\,826 & 30\,874 \\
+TP = 2     & GPU 0        & 13\,513 & 15\,512 \\
+TP = 2     & GPU 1        & 13\,513 & 15\,512 \\
+\hline
+\end{tabular}
+\end{table}
+
+\vspace{0.3cm}
+
+\begin{exampleblock}{Результат}
+Коэффициент снижения: $26826 / 13513 \approx \mathbf{1.985\times}$ (теор. предел $2.0\times$)
+\end{exampleblock}
+
+\end{frame}
+
+\begin{frame}
+\frametitle{Эксперимент 2: TP --- корректность bounds}
+
+\textbf{Метод:} CROWN, $\varepsilon{=}0.02$; сравнение TP$=$2 с single-GPU эталоном
+
+\vspace{0.2cm}
+
+\begin{table}[h]
+\centering
+\scriptsize
+\begin{tabular}{lccc}
+\hline
+\textbf{Модель} & \textbf{Пар Col-Row} & $|lb_{\text{diff}}|$ & $|ub_{\text{diff}}|$ \\
+\hline
+PyTorch 256$\times$2 & 1 & $3 \cdot 10^{-8}$ & $3 \cdot 10^{-8}$ \\
+PyTorch 256$\times$4 & 2 & $2.5 \cdot 10^{0}$  & $2.5 \cdot 10^{0}$ \\
+ONNX 256$\times$2    & 1 & $6 \cdot 10^{-8}$ & $6 \cdot 10^{-8}$ \\
+ONNX 256$\times$4    & 2 & $5.6 \cdot 10^{0}$  & $4.0 \cdot 10^{0}$ \\
+ONNX 256$\times$6    & 3 & $7.9 \cdot 10^{2}$  & $7.5 \cdot 10^{2}$ \\
+\hline
+\end{tabular}
+\end{table}
+
+\vspace{0.2cm}
+
+\begin{alertblock}{Вывод}
+Soundness подтверждена для всех конфигураций ($lb_{\text{tp}} \leq lb_{\text{ref}}$, $ub_{\text{tp}} \geq ub_{\text{ref}}$).
+\begin{itemize}
+    \item 1 пара Col-Row: совпадение с точностью $\sim 10^{-8}$ (машинный $\varepsilon$)
+    \item 2+ пар: bounds шире эталона, ошибка растёт на порядки (IBP fallback)
+\end{itemize}
+\end{alertblock}
+
+\end{frame}
+
+\begin{frame}
+\frametitle{Эксперимент 3: автошардирование VNN-COMP моделей}
+
+\begin{block}{Задача}
+Проверить \texttt{tp\_shard\_bounded\_module} на ONNX-моделях MNIST-FC из VNN-COMP 2022
+\end{block}
+
+\vspace{0.3cm}
+
+\textbf{Процесс:}
+\begin{enumerate}
+    \item Загрузка ONNX $\to$ PyTorch (\texttt{onnx2pytorch})
+    \item Обёртка в \texttt{BoundedModule}
+    \item Автоматическое шардирование без ручного вмешательства
+\end{enumerate}
+
+\vspace{0.3cm}
+
+\begin{exampleblock}{Результат}
+Все 3 модели (256$\times$2, 256$\times$4, 256$\times$6) успешно шардированы и прошли тест на soundness
+\end{exampleblock}
+
+\end{frame}
+
+\begin{frame}
+\frametitle{Эксперимент 4: FSDP --- корректность bounds}
+
+\textbf{Метод:} IBP + CROWN, FSDP$=$2 vs single-GPU; 8 конфигураций
+
+\vspace{0.2cm}
+
+\begin{table}[h]
+\centering
+\scriptsize
+\begin{tabular}{llcc}
+\hline
+\textbf{Модель} & \textbf{Метод} & $|\Delta lb|$ & $|\Delta ub|$ \\
+\hline
+MLP 256$\times$2 & IBP   & $0.00$ & $0.00$ \\
+MLP 256$\times$2 & CROWN & $0.00$ & $0.00$ \\
+MLP 256$\times$4 & IBP   & $0.00$ & $0.00$ \\
+MLP 256$\times$4 & CROWN & $0.00$ & $0.00$ \\
+MLP 256$\times$6 & CROWN & $0.00$ & $0.00$ \\
+ONNX 256$\times$2 & CROWN & $0.00$ & $0.00$ \\
+ONNX 256$\times$4 & CROWN & $0.00$ & $0.00$ \\
+\hline
+\end{tabular}
+\end{table}
+
+\vspace{0.2cm}
+
+\begin{exampleblock}{Результат}
+\textbf{Побитово идентичные} bounds для всех моделей и методов ($\Delta = 0.00$, не $\sim\!10^{-8}$). Кросс-ранговое расхождение: $0.00$.
+\end{exampleblock}
+
+\end{frame}
+
+\begin{frame}
+\frametitle{Эксперимент 5: FSDP --- потребление памяти}
+
+\begin{columns}[T]
+\begin{column}{0.48\textwidth}
+\textbf{Baseline-память (веса):}
+
+\scriptsize
+\begin{tabular}{lrrr}
+\hline
+\textbf{Модель} & \textbf{Single} & \textbf{FSDP} & \textbf{$\downarrow$\%} \\
+\hline
+$h{=}256, d{=}4$  & 26 & 11 & 57 \\
+$h{=}1024, d{=}4$ & 187 & 40 & 79 \\
+$h{=}4096, d{=}4$ & 2272 & 417 & 82 \\
+$h{=}8192, d{=}4$ & 8760 & 1594 & 82 \\
+$h{=}4096, d{=}8$ & 9721 & 930 & \textbf{90} \\
+\hline
+\end{tabular}
+\normalsize
+\end{column}
+
+\begin{column}{0.48\textwidth}
+\textbf{Пиковая память:}
+
+\scriptsize
+\begin{tabular}{lrrr}
+\hline
+\textbf{Модель} & \textbf{Single} & \textbf{FSDP} & \textbf{$\downarrow$\%} \\
+\hline
+$h{=}4096, d{=}4$  & 3800 & 2527 & 34 \\
+$h{=}8192, d{=}4$  & 14759 & 9782 & 34 \\
+$h{=}4096, d{=}8$  & 16726 & 10232 & \textbf{39} \\
+\hline
+\end{tabular}
+\normalsize
+\end{column}
+\end{columns}
+
+\vspace{0.3cm}
+
+Размеры в МБ. Теория: $M_W^{\text{FSDP}}/M_W^{\text{single}} = 1/P + 1/d$
+
+\end{frame}
+
+\begin{frame}
+\frametitle{Сравнение TP и FSDP}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{|l|c|c|}
+\hline
+& \textbf{TP} & \textbf{FSDP} \\
+\hline
+Пиковая память & $\sim\!2\times$ снижение & 34--39\% снижение \\
+\hline
+Baseline-память & $\sim\!2\times$ снижение & 80--90\% снижение \\
+\hline
+Точность bounds & Падает с глубиной & Побитово идентична \\
+\hline
+Совместимость с $\beta$-CROWN & Сложно & Да \\
+\hline
+Объём реализации & $\sim$500 строк & $\sim$100 строк \\
+\hline
+\end{tabular}
+\end{table}
+
+\vspace{0.3cm}
+
+\begin{block}{Вывод}
+TP --- максимальная экономия памяти для неглубоких моделей; \\
+FSDP --- идеальная точность и совместимость с полной верификацией
+\end{block}
+
+\end{frame}

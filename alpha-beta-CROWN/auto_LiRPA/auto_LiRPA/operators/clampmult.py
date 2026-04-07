@@ -149,7 +149,7 @@ def multiply_by_A_signs(A, d_pos, d_neg, b_pos, b_neg, contiguous='auto',
                         reduce_bias=True, same_slope=False):
     if isinstance(A, Tensor):
         if contiguous is True or contiguous == 'auto':
-            # For dense mode, convert d_pos and d_neg to contiguous tensor by default.
+            A = A.contiguous()
             d_pos = d_pos.contiguous()
             d_neg = d_neg.contiguous()
         if d_pos.ndim == 1:

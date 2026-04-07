@@ -40,6 +40,30 @@ $$\underline{W}_j x + \underline{b}_j \leq f_j(x) \leq \overline{W}_j x + \overl
 \end{frame}
 
 \begin{frame}
+\frametitle{Методы верификации: IBP}
+
+\begin{block}{Interval Bound Propagation (IBP)}
+Послойное распространение интервалов --- самый быстрый, но наименее точный метод
+\end{block}
+
+\vspace{0.3cm}
+
+\textbf{Формулы для линейного слоя} с $W$ и входным интервалом $[\ell, u]$:
+$$\ell_{out} = W^+ \ell + W^- u + b, \qquad u_{out} = W^+ u + W^- \ell + b$$
+где $W^+ = \max(W, 0)$, $W^- = \min(W, 0)$
+
+\vspace{0.3cm}
+
+\textbf{Сравнение IBP и CROWN:}
+\begin{itemize}
+    \item \textbf{CROWN} --- сохраняет линейную зависимость $y = Ax + b$ через все слои, учитывает корреляции между переменными
+    \item \textbf{IBP} --- каждый слой рассматривает входы как независимые $\Rightarrow$ \textit{wrapping effect}: ширина bounds растёт экспоненциально с глубиной
+    \item IBP: $O(d)$ по времени, минимум памяти; CROWN: $O(d^2)$, но значительно точнее
+\end{itemize}
+
+\end{frame}
+
+\begin{frame}
 \frametitle{Проблема масштабируемости}
 
 \begin{alertblock}{Барьер памяти (Memory Wall)}
