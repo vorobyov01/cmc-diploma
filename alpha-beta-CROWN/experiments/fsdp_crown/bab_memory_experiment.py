@@ -48,7 +48,7 @@ def export_onnx(model, input_dim, path):
 
 
 def make_vnnlib(input_dim, eps, target_class, path):
-    """Generate a simple robustness vnnlib spec.
+    """Generate a simple robustness vnnlib spec in DNF format.
 
     Asserts that output[target_class] >= output[j] for all j != target_class,
     given L-inf perturbation of size eps around a random input.
@@ -65,13 +65,13 @@ def make_vnnlib(input_dim, eps, target_class, path):
             hi = min(1.0, x0[i].item() + eps)
             f.write(f"(assert (<= X_{i} {hi:.6f}))\n")
             f.write(f"(assert (>= X_{i} {lo:.6f}))\n")
-        # Disjunction: at least one non-target class beats target → unsafe
-        # This is the negation of robustness → if solver proves UNSAT, model is robust
-        f.write("(assert (or\n")
+        # DNF: disjunction of single-element conjunctions
+        # Each clause says "non-target class j beats target" → property violated
+        clauses = []
         for j in range(OUTPUT_DIM):
             if j != target_class:
-                f.write(f"  (>= Y_{j} Y_{target_class})\n")
-        f.write("))\n")
+                clauses.append(f"(and (>= Y_{j} Y_{target_class}))")
+        f.write(f"(assert (or {''.join(clauses)}))\n")
 
 
 def weight_memory_mb(model):
