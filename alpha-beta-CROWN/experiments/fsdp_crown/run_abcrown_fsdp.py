@@ -26,9 +26,13 @@ torch.cuda.set_device(rank)
 
 if world_size > 1:
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
-    # Disable TorchScript JIT fuser to avoid a strides assertion bug
-    # in the codegen fuser that triggers only on non-primary GPUs.
+    # Disable ALL TorchScript JIT fusers to avoid a strides assertion
+    # bug in the codegen fuser that triggers only on non-primary GPUs.
     torch._C._jit_set_texpr_fuser_enabled(False)
+    torch._C._jit_set_profiling_executor(False)
+    torch._C._jit_set_profiling_mode(False)
+    torch._C._jit_override_can_fuse_on_gpu(False)
+    torch._C._jit_override_can_fuse_on_cpu(False)
     if rank != 0:
         sys.stdout = open(os.devnull, "w")
 
