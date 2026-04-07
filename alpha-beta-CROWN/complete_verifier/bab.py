@@ -153,7 +153,11 @@ def split_domain(net: LiRPANet, domains, d, batch, stats=None,
         from bab_parallel import scatter_domain_dict, gather_result_dict
         _rank = _dist.get_rank()
         _ws = _dist.get_world_size()
+        print(f'[Rank {_rank}] DP scatter: _actual_batch={_actual_batch}, '
+              f'batch(decisions)={batch}', flush=True)
         d_local = scatter_domain_dict(d, _rank, _ws)
+        _local_b = next(iter(d_local['lower_bounds'].values())).shape[0]
+        print(f'[Rank {_rank}] d_local batch={_local_b}', flush=True)
         ret_local = net.update_bounds(
             d_local, fix_interm_bounds=fix_interm_bounds,
             stop_criterion_func=lambda x: False,
