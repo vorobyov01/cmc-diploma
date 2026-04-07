@@ -140,8 +140,11 @@ def _gather_list(lst, world_size):
     """AllGather a Python list across ranks via pickled GPU byte tensors.
 
     Avoids all_gather_object which requires a gloo backend.
+    Moves CUDA tensors to CPU before pickling and back to the local
+    device after unpickling so cross-device tensor references don't leak.
     """
-    data = pickle.dumps(lst)
+    cpu_lst = _recursive_to_cpu(lst)
+    data = pickle.dumps(cpu_lst)
     size = len(data)
     device = torch.device("cuda")
 
@@ -161,4 +164,28 @@ def _gather_list(lst, world_size):
     for b, sz in zip(all_bufs, all_sizes):
         part = pickle.loads(bytes(b[:int(sz.item())].cpu().numpy()))
         result.extend(part)
-    return result
+    return _recursive_to_device(result, device)
+
+
+def _recursive_to_cpu(obj):
+    """Recursively move tensors to CPU for safe cross-rank pickling."""
+    if isinstance(obj, torch.Tensor):
+        return obj.cpu()
+    if isinstance(obj, dict):
+        return {k: _recursive_to_cpu(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        converted = [_recursive_to_cpu(x) for x in obj]
+        return type(obj)(converted)
+    return obj
+
+
+def _recursive_to_device(obj, device):
+    """Recursively move tensors to target device."""
+    if isinstance(obj, torch.Tensor):
+        return obj.to(device, non_blocking=True)
+    if isinstance(obj, dict):
+        return {k: _recursive_to_device(v, device) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        converted = [_recursive_to_device(x, device) for x in obj]
+        return type(obj)(converted) if isinstance(obj, tuple) else converted
+    return obj
