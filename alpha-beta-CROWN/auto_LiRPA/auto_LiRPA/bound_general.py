@@ -464,6 +464,10 @@ class BoundedModule(nn.Module):
         fv = node.forward(*inputs)
         if isinstance(fv, (torch.Size, tuple)):
             fv = torch.tensor(fv, device=self.device)
+        _dbg_types = ('BoundShape', 'BoundReshape', 'BoundConstantOfShape', 'BoundConv')
+        if type(node).__name__ in _dbg_types:
+            in_shapes = [getattr(i, 'shape', '?') for i in inputs]
+            print(f"[DBG] {type(node).__name__} name={node.name} in_shapes={in_shapes} out={fv.shape if hasattr(fv,'shape') else fv}")
         node.forward_value = fv
         node.output_shape = fv.shape
         # In most cases, the batch dimension is just the first dimension
