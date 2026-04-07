@@ -25,6 +25,11 @@ def _chunk_range(total, rank, world_size):
     return start, end
 
 
+def _ensure_contiguous(t):
+    """Call .contiguous() on tensors to avoid TorchScript JIT fuser issues."""
+    return t.contiguous() if isinstance(t, torch.Tensor) and not t.is_contiguous() else t
+
+
 def scatter_domain_dict(d, rank, world_size):
     """Slice domain dict d so that this rank gets its portion of the batch.
 
@@ -38,25 +43,34 @@ def scatter_domain_dict(d, rank, world_size):
     batch = _get_batch_size(d)
     lo, hi = _chunk_range(batch, rank, world_size)
 
+    if lo >= hi:
+        # This rank got 0 domains — give it the last domain as a dummy
+        # so update_bounds doesn't crash on empty tensors.
+        # The caller must trim padded results after gather.
+        lo, hi = batch - 1, batch
+
     out = {}
     for key, val in d.items():
         if key in ('lower_bounds', 'upper_bounds', 'lAs'):
-            out[key] = {k: v[lo:hi] for k, v in val.items()}
+            out[key] = {k: _ensure_contiguous(v[lo:hi]) for k, v in val.items()}
         elif key == 'alphas':
             out[key] = {
-                outer_k: {inner_k: v[:, :, lo:hi] for inner_k, v in outer_v.items()}
+                outer_k: {
+                    inner_k: _ensure_contiguous(v[:, :, lo:hi])
+                    for inner_k, v in outer_v.items()
+                }
                 for outer_k, outer_v in val.items()
             }
         elif key == 'mask':
             if val is None:
                 out[key] = None
             else:
-                out[key] = {k: v[lo:hi] for k, v in val.items()}
+                out[key] = {k: _ensure_contiguous(v[lo:hi]) for k, v in val.items()}
         elif key in ('betas', 'intermediate_betas', 'history',
                      'split_history', 'depths'):
             out[key] = val[lo:hi]
         elif isinstance(val, torch.Tensor):
-            out[key] = val[lo:hi]
+            out[key] = _ensure_contiguous(val[lo:hi])
         elif val is None:
             out[key] = None
         else:
