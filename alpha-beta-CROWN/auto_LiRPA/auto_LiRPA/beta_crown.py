@@ -230,13 +230,6 @@ def beta_crown_backward_bound(self: 'BoundedModule', node, lA, uA, start_node=No
                 uA.reshape(uA.size(0), uA.size(1), -1), dim=2,
                 index=beta_indices, src=beta_values).view(uA.size())
         if lA is not None:
-            if lA.numel() == 0:
-                import torch.distributed as _dd
-                _rr = _dd.get_rank() if _dd.is_initialized() else -1
-                print(f'[Rank {_rr}] BUG: lA.numel()==0, lA.size()={list(lA.size())}, '
-                      f'A.size()={list(A.size())}, '
-                      f'beta_indices.size()={list(beta_indices.size())}, '
-                      f'node={node.name}', flush=True)
             lA = node.non_deter_scatter_add(
                 lA.reshape(lA.size(0), lA.size(1), -1), dim=2,
                 index=beta_indices, src=beta_values.neg()).view(lA.size())

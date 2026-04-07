@@ -136,11 +136,6 @@ def split_domain(net: LiRPANet, domains, d, batch, stats=None,
     import torch.distributed as _dist
     _dp_active = _dist.is_initialized() and _dist.get_world_size() > 1
 
-    # batch here is len(split['decision']) which may differ from actual
-    # domain count in d after build_history_and_set_bounds.
-    _actual_batch = next(iter(d['lower_bounds'].values())).shape[0]
-    _use_dp = _dp_active and _actual_batch >= _dist.get_world_size() * 2
-
     if _dp_active:
         # With FSDP, all ranks must iterate the same number of times in
         # CROWN-optimized to avoid deadlocking on AllGather.  Disable
@@ -148,27 +143,8 @@ def split_domain(net: LiRPANet, domains, d, batch, stats=None,
         net.net.set_bound_opts({'optimize_bound_args': {
             'early_stop_patience': int(1e9),
         }})
-
-    if _use_dp:
-        from bab_parallel import scatter_domain_dict, gather_result_dict
-        _rank = _dist.get_rank()
-        _ws = _dist.get_world_size()
-        print(f'[Rank {_rank}] DP scatter: _actual_batch={_actual_batch}, '
-              f'batch(decisions)={batch}', flush=True)
-        d_local = scatter_domain_dict(d, _rank, _ws)
-        _local_b = next(iter(d_local['lower_bounds'].values())).shape[0]
-        print(f'[Rank {_rank}] d_local batch={_local_b}', flush=True)
-        ret_local = net.update_bounds(
-            d_local, fix_interm_bounds=fix_interm_bounds,
-            stop_criterion_func=lambda x: False,
-            multi_spec_keep_func=multi_spec_keep_func_all,
-            beta_bias=branching_points is not None,
-            enable_clip_domains=enable_clip_domains,
-        )
-        ret = gather_result_dict(ret_local, _ws)
-        del d_local, ret_local
-    elif _dp_active:
-        # Batch too small to split — all ranks process the full batch.
+        # All ranks process the full batch (no domain scatter).
+        # FSDP shards only the weight storage; computation is replicated.
         ret = net.update_bounds(
             d, fix_interm_bounds=fix_interm_bounds,
             stop_criterion_func=lambda x: False,
