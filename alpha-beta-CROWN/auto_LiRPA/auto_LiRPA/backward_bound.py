@@ -360,6 +360,10 @@ def backward_general(
                 continue
 
             lA, uA = l.lA, l.uA
+            import torch.distributed as _dd2
+            if _dd2.is_initialized() and lA is not None and lA.size(1) == 0:
+                print(f'[Rank {_dd2.get_rank()}] ZERO_BATCH lA at node={l.name}, '
+                      f'lA.size={list(lA.size())}, type={type(l).__name__}', flush=True)
             if (l.name != start_backpropagation_at_node.name and use_beta_crown
                     and getattr(l, 'sparse_betas', None)):
                 lA, uA, lbias, ubias = self.beta_crown_backward_bound(
@@ -395,6 +399,14 @@ def backward_general(
                 start_shape=start_shape)
             if _tp_active:
                 _tp_log(f"bound_backward DONE: {type(l).__name__} name={l.name}")
+
+            if _dd2.is_initialized():
+                for _a_entry in A:
+                    if _a_entry is not None:
+                        _a_val = _a_entry[0] if isinstance(_a_entry, tuple) else _a_entry
+                        if isinstance(_a_val, Tensor) and _a_val.ndim > 1 and _a_val.size(1) == 0:
+                            print(f'[Rank {_dd2.get_rank()}] ZERO_BATCH after bound_backward '
+                                  f'node={l.name}, A_entry.size={list(_a_val.size())}', flush=True)
 
             for inp in _fsdp_gathered:
                 fsdp_free_node(inp)
