@@ -31,8 +31,17 @@ class BoundConcat(Bound):
 
     def forward(self, *x):  # x is a list of tensors
         x = [(item if isinstance(item, Tensor) else torch.tensor(item)) for item in x]
-        self.input_size = [item.shape[self.axis] for item in x]
-        self.axis = self.make_axis_non_negative(self.axis)
+        # Fix JIT-baked batch dimensions: when tensors have mismatched dim-0
+        # sizes (one is 1, others are > 1) and the concat axis is not 0,
+        # expand the size-1 tensors to match.
+        axis = self.make_axis_non_negative(self.axis)
+        if axis != 0 and len(x) > 1:
+            max_batch = max(item.shape[0] for item in x)
+            if max_batch > 1:
+                x = [item.expand(max_batch, *item.shape[1:]) if item.shape[0] == 1 else item
+                     for item in x]
+        self.input_size = [item.shape[axis] for item in x]
+        self.axis = axis
         return torch.cat(x, dim=int(self.axis))
 
     def interval_propagate(self, *v):
