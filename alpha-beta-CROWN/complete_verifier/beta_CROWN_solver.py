@@ -434,6 +434,12 @@ class LiRPANet:
                     self.split_activations)
         ######### Clip and Verify Domains End ##########
 
+        import torch.distributed as _dbg_dist
+        if _dbg_dist.is_initialized():
+            _dbg_r = _dbg_dist.get_rank()
+            print(f'[Rank {_dbg_r}] compute_bounds: new_x.shape={new_x.shape}, '
+                  f'c.shape={c.shape if c is not None else None}, '
+                  f'batch={batch}, method={method}', flush=True)
         tmp_ret = self.net.compute_bounds(
             x=(new_x,), C=c, method=method,
             interm_bounds=interm_bounds, reference_bounds=reference_bounds,

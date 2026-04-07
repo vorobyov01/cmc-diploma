@@ -33,8 +33,8 @@ if world_size > 1:
     torch._C._jit_set_profiling_mode(False)
     torch._C._jit_override_can_fuse_on_gpu(False)
     torch._C._jit_override_can_fuse_on_cpu(False)
-    if rank != 0:
-        sys.stdout = open(os.devnull, "w")
+    # Temporarily keep stdout open for debugging
+    pass
 
 torch.cuda.reset_peak_memory_stats()
 
