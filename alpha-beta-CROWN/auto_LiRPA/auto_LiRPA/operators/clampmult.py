@@ -133,6 +133,14 @@ class ClampedMultiplication(torch.autograd.Function):
         ctx.patches_mode = patches_mode
         ctx.reduce_bias = reduce_bias
         ctx.same_slope = same_slope
+        # TorchScript JIT fuser requires contiguous tensors.
+        A = A.contiguous()
+        d_pos = d_pos.contiguous()
+        d_neg = d_neg.contiguous()
+        if b_pos is not None:
+            b_pos = b_pos.contiguous()
+        if b_neg is not None:
+            b_neg = b_neg.contiguous()
         return ClampedMultiplication.clamp_mutiply_forward(
             A, d_pos, d_neg, b_pos, b_neg, patches_mode, reduce_bias, same_slope)
 
