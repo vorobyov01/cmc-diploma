@@ -456,6 +456,8 @@ class BoundedModule(nn.Module):
     def get_forward_value(self, node):
         """ Recursively get `forward_value` for `node` and its parent nodes"""
         if getattr(node, 'forward_value', None) is not None:
+            if type(node).__name__ == 'BoundShape':
+                print(f"[DBG CACHED] BoundShape name={node.name} fv={node.forward_value}")
             return node.forward_value
         inputs = [self.get_forward_value(inp) for inp in node.inputs]
         for inp in node.inputs:
