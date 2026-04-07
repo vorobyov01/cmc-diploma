@@ -141,9 +141,10 @@ def split_domain(net: LiRPANet, domains, d, batch, stats=None,
         # CROWN-optimized to avoid deadlocking on AllGather.  Disable
         # early-exit mechanisms and pruning_in_iteration (which can reduce
         # the batch to 0 and cause reshape errors).
+        # Must set via arguments.Config because update_bounds re-reads it.
+        arguments.Config['bab']['pruning_in_iteration'] = False
         net.net.set_bound_opts({'optimize_bound_args': {
             'early_stop_patience': int(1e9),
-            'pruning_in_iteration': False,
         }})
         ret = net.update_bounds(
             d, fix_interm_bounds=fix_interm_bounds,
