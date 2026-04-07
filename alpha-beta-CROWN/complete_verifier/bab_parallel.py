@@ -1,0 +1,135 @@
+"""Domain-parallel utilities for Branch-and-Bound verification.
+
+Splits a batch of BaB domains across multiple GPUs so each GPU runs
+update_bounds on batch/N domains, then gathers the results back.
+Combined with FSDP weight sharding, this gives both memory savings
+and ~Nx speedup.
+"""
+
+import torch
+import torch.distributed as dist
+
+
+def _chunk_range(total, rank, world_size):
+    """Return (start, end) indices for rank's chunk of total items."""
+    chunk = total // world_size
+    remainder = total % world_size
+    if rank < remainder:
+        start = rank * (chunk + 1)
+        end = start + chunk + 1
+    else:
+        start = remainder * (chunk + 1) + (rank - remainder) * chunk
+        end = start + chunk
+    return start, end
+
+
+def scatter_domain_dict(d, rank, world_size):
+    """Slice domain dict d so that this rank gets its portion of the batch.
+
+    All ranks are assumed to hold the identical full d (from identical
+    pick_out + build_history_and_set_bounds).  No communication needed —
+    each rank just takes its own slice.
+
+    Returns a new dict with the same keys but batch-sliced values.
+    The original d is NOT modified.
+    """
+    batch = _get_batch_size(d)
+    lo, hi = _chunk_range(batch, rank, world_size)
+
+    out = {}
+    for key, val in d.items():
+        if key in ('lower_bounds', 'upper_bounds', 'lAs'):
+            out[key] = {k: v[lo:hi] for k, v in val.items()}
+        elif key == 'alphas':
+            out[key] = {
+                outer_k: {inner_k: v[:, :, lo:hi] for inner_k, v in outer_v.items()}
+                for outer_k, outer_v in val.items()
+            }
+        elif key == 'mask':
+            if val is None:
+                out[key] = None
+            else:
+                out[key] = {k: v[lo:hi] for k, v in val.items()}
+        elif key in ('betas', 'intermediate_betas', 'history',
+                     'split_history', 'depths'):
+            out[key] = val[lo:hi]
+        elif isinstance(val, torch.Tensor):
+            out[key] = val[lo:hi]
+        elif val is None:
+            out[key] = None
+        else:
+            out[key] = val
+    return out
+
+
+def gather_result_dict(local_ret, world_size):
+    """AllGather result dicts from all ranks, concatenating along batch dim.
+
+    Each rank calls this with its local_ret from update_bounds.
+    Returns the full gathered result dict on every rank.
+    """
+    if world_size <= 1:
+        return local_ret
+
+    out = {}
+    for key, val in local_ret.items():
+        if key in ('lower_bounds', 'upper_bounds', 'lAs'):
+            out[key] = _gather_tensor_dict(val, world_size, cat_dim=0)
+        elif key == 'alphas':
+            out[key] = {}
+            for outer_k, outer_v in val.items():
+                out[key][outer_k] = _gather_tensor_dict(outer_v, world_size, cat_dim=2)
+        elif key == 'unstable_bounds':
+            if val is None:
+                out[key] = None
+            else:
+                out[key] = {}
+                for k, (lb, ub) in val.items():
+                    g_lb = _gather_tensor(lb, world_size, cat_dim=0)
+                    g_ub = _gather_tensor(ub, world_size, cat_dim=0)
+                    out[key][k] = [g_lb, g_ub]
+        elif key in ('betas', 'intermediate_betas', 'split_history'):
+            out[key] = _gather_list(val, world_size)
+        elif isinstance(val, torch.Tensor):
+            out[key] = _gather_tensor(val, world_size, cat_dim=0)
+        elif val is None:
+            out[key] = None
+        else:
+            out[key] = val
+    return out
+
+
+def _get_batch_size(d):
+    """Infer batch size from the domain dict."""
+    for name in ('thresholds', 'cs', 'global_lb'):
+        if name in d and isinstance(d[name], torch.Tensor):
+            return d[name].shape[0]
+    if 'lower_bounds' in d:
+        for v in d['lower_bounds'].values():
+            return v.shape[0]
+    if 'depths' in d and isinstance(d['depths'], list):
+        return len(d['depths'])
+    raise RuntimeError("Cannot infer batch size from domain dict")
+
+
+def _gather_tensor(t, world_size, cat_dim=0):
+    """AllGather a tensor across all ranks and concatenate."""
+    parts = [torch.empty_like(t) for _ in range(world_size)]
+    dist.all_gather(parts, t.contiguous())
+    return torch.cat(parts, dim=cat_dim)
+
+
+def _gather_tensor_dict(td, world_size, cat_dim=0):
+    """AllGather each tensor in a dict."""
+    return {k: _gather_tensor(v, world_size, cat_dim=cat_dim)
+            for k, v in td.items()}
+
+
+def _gather_list(lst, world_size):
+    """AllGather a Python list across all ranks."""
+    gathered = [None] * world_size
+    dist.all_gather_object(gathered, lst)
+    result = []
+    for part in gathered:
+        result.extend(part)
+    return result

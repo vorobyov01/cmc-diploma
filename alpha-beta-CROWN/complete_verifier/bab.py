@@ -93,6 +93,16 @@ def split_domain(net: LiRPANet, domains, d, batch, stats=None,
             d, split_depth, method=branch_args['method'],
             branching_candidates=max(branch_args['candidates'], split_depth),
             branching_reduceop=branch_args['reduceop']))
+
+    # With domain-parallel BaB, ranks may have diverged net state after
+    # update_bounds on different domain slices.  Broadcast rank 0's
+    # branching decisions to guarantee all ranks split identically.
+    import torch.distributed as _dist
+    if _dist.is_initialized() and _dist.get_world_size() > 1:
+        _bcast = [branching_decision, branching_points, split_depth]
+        _dist.broadcast_object_list(_bcast, src=0)
+        branching_decision, branching_points, split_depth = _bcast
+
     if len(branching_decision) < len(next(iter(d['mask'].values()))):
         print('all nodes are split!!')
         print(f'{stats.visited} domains visited')
@@ -131,13 +141,32 @@ def split_domain(net: LiRPANet, domains, d, batch, stats=None,
     # maybe other 'keeping' criterion needs to be passed here
     if enable_clip_domains and net.domain_clipper is not None:
         net.domain_clipper.get_stop_criterion_and_iter(stop_func, iter_idx)
-    ret = net.update_bounds(
-        d, fix_interm_bounds=fix_interm_bounds,
-        stop_criterion_func=stop_func(d['thresholds']),
-        multi_spec_keep_func=multi_spec_keep_func_all,
-        beta_bias=branching_points is not None,
-        enable_clip_domains=enable_clip_domains,
-    )
+
+    import torch.distributed as _dist
+    _dp_active = _dist.is_initialized() and _dist.get_world_size() > 1
+
+    if _dp_active:
+        from bab_parallel import scatter_domain_dict, gather_result_dict
+        _rank = _dist.get_rank()
+        _ws = _dist.get_world_size()
+        d_local = scatter_domain_dict(d, _rank, _ws)
+        ret_local = net.update_bounds(
+            d_local, fix_interm_bounds=fix_interm_bounds,
+            stop_criterion_func=stop_func(d_local['thresholds']),
+            multi_spec_keep_func=multi_spec_keep_func_all,
+            beta_bias=branching_points is not None,
+            enable_clip_domains=enable_clip_domains,
+        )
+        ret = gather_result_dict(ret_local, _ws)
+        del d_local, ret_local
+    else:
+        ret = net.update_bounds(
+            d, fix_interm_bounds=fix_interm_bounds,
+            stop_criterion_func=stop_func(d['thresholds']),
+            multi_spec_keep_func=multi_spec_keep_func_all,
+            beta_bias=branching_points is not None,
+            enable_clip_domains=enable_clip_domains,
+        )
     stats.timer.add('solve')
 
     if (solver_args['beta-crown']['all_node_split_LP']
