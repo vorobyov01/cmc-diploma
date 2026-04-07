@@ -461,12 +461,10 @@ class BoundedModule(nn.Module):
         for inp in node.inputs:
             node.from_input = node.from_input or inp.from_input
         node.input_shape = inputs[0].shape if len(inputs) > 0 else None
+        node._batch_size = getattr(self, '_batch_size', None)
         fv = node.forward(*inputs)
         if isinstance(fv, (torch.Size, tuple)):
             fv = torch.tensor(fv, device=self.device)
-        if type(node).__name__ == 'BoundReshape' and node.name == '/162':
-            inp_names = [n.name for n in node.inputs]
-            print(f"[DBG /162] target input node={inp_names[1]} type={type(node.inputs[1]).__name__} from_input={node.inputs[1].from_input} target_val={inputs[1]}")
         node.forward_value = fv
         node.output_shape = fv.shape
         # In most cases, the batch dimension is just the first dimension
@@ -652,6 +650,7 @@ class BoundedModule(nn.Module):
             cache_bounds=cache_bounds,
         )
         inputs_unpacked = unpack_inputs(x)
+        self._batch_size = None
         for name, index in zip(self.input_name, self.input_index):
             if index is None:
                 continue
@@ -661,6 +660,8 @@ class BoundedModule(nn.Module):
                 node.perturbation = node.value.ptb
             else:
                 node.perturbation = None
+            if self._batch_size is None and hasattr(node.value, 'shape') and len(node.value.shape) >= 1:
+                self._batch_size = node.value.shape[0]
         # Mark all perturbed nodes.
         if reset_perturbed_nodes:
             self._mark_perturbed_nodes(inputs_unpacked)

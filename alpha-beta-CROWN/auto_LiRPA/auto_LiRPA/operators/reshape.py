@@ -29,6 +29,16 @@ class BoundReshape(Bound):
 
     def forward(self, x, shape):
         shape = list(shape)
+        # torch.jit.trace constant-folds Shape ops, baking the traced batch
+        # size (typically 1) into reshape targets. When the actual batch size
+        # differs (e.g., during BaB domain splitting), replace the leading
+        # dimension so the reshape stays consistent with the input batch.
+        batch_size = getattr(self, '_batch_size', None)
+        if batch_size is None:
+            batch_size = x.shape[0] if x.ndim >= 2 else None
+        if (batch_size is not None and len(shape) >= 2
+                and shape[0] != batch_size and shape[0] >= 1):
+            shape[0] = batch_size
         for i in range(len(shape)):
             if shape[i] == -1:
                 shape[i] = prod(x.shape) // int(prod(shape[:i]) * prod(shape[(i + 1):]))

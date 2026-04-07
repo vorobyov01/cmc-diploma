@@ -77,7 +77,12 @@ class BoundConstantOfShape(Bound):
     def forward(self, x):
         self.x = x
         self.from_input = True
-        return self.value.expand(*list(x))
+        shape = list(x)
+        # Fix JIT-baked batch dimension (see BoundReshape.forward for details).
+        batch_size = getattr(self, '_batch_size', None)
+        if batch_size is not None and len(shape) >= 2 and shape[0] >= 1 and shape[0] != batch_size:
+            shape[0] = batch_size
+        return self.value.expand(*shape)
 
     def bound_backward(self, last_lA, last_uA, x, **kwargs):
         if last_lA is not None:
