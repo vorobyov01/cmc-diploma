@@ -75,29 +75,36 @@ def gather_result_dict(local_ret, world_size):
 
     out = {}
     for key, val in local_ret.items():
-        if key in ('lower_bounds', 'upper_bounds', 'lAs'):
-            out[key] = _gather_tensor_dict(val, world_size, cat_dim=0)
-        elif key == 'alphas':
-            out[key] = {}
-            for outer_k, outer_v in val.items():
-                out[key][outer_k] = _gather_tensor_dict(outer_v, world_size, cat_dim=2)
-        elif key == 'unstable_bounds':
-            if val is None:
-                out[key] = None
-            else:
+        try:
+            if key in ('lower_bounds', 'upper_bounds', 'lAs'):
+                out[key] = _gather_tensor_dict(val, world_size, cat_dim=0)
+            elif key == 'alphas':
                 out[key] = {}
-                for k, (lb, ub) in val.items():
-                    g_lb = _gather_tensor(lb, world_size, cat_dim=0)
-                    g_ub = _gather_tensor(ub, world_size, cat_dim=0)
-                    out[key][k] = [g_lb, g_ub]
-        elif key in ('betas', 'intermediate_betas', 'split_history'):
-            out[key] = _gather_list(val, world_size)
-        elif isinstance(val, torch.Tensor):
-            out[key] = _gather_tensor(val, world_size, cat_dim=0)
-        elif val is None:
-            out[key] = None
-        else:
-            out[key] = val
+                for outer_k, outer_v in val.items():
+                    out[key][outer_k] = _gather_tensor_dict(
+                        outer_v, world_size, cat_dim=2)
+            elif key == 'unstable_bounds':
+                if val is None:
+                    out[key] = None
+                else:
+                    out[key] = {}
+                    for k, pair in val.items():
+                        out[key][k] = [
+                            _gather_tensor(pair[0], world_size, cat_dim=0),
+                            _gather_tensor(pair[1], world_size, cat_dim=0),
+                        ]
+            elif key in ('betas', 'intermediate_betas', 'split_history'):
+                out[key] = _gather_list(val, world_size)
+            elif isinstance(val, torch.Tensor) and val.device.type == 'cuda':
+                out[key] = _gather_tensor(val, world_size, cat_dim=0)
+            else:
+                out[key] = val
+        except Exception as e:
+            raise RuntimeError(
+                f"gather_result_dict failed on key={key!r}, "
+                f"type={type(val).__name__}, "
+                f"device={getattr(val, 'device', 'N/A')}: {e}"
+            ) from e
     return out
 
 
@@ -116,6 +123,8 @@ def _get_batch_size(d):
 
 def _gather_tensor(t, world_size, cat_dim=0):
     """AllGather a tensor across all ranks and concatenate."""
+    if t.device.type != 'cuda':
+        t = t.to('cuda')
     parts = [torch.empty_like(t) for _ in range(world_size)]
     dist.all_gather(parts, t.contiguous())
     return torch.cat(parts, dim=cat_dim)
