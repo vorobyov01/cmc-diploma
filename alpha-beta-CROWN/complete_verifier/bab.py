@@ -136,17 +136,21 @@ def split_domain(net: LiRPANet, domains, d, batch, stats=None,
     import torch.distributed as _dist
     _dp_active = _dist.is_initialized() and _dist.get_world_size() > 1
 
+    _use_dp = _dp_active and batch >= _dist.get_world_size() * 2
+
     if _dp_active:
-        from bab_parallel import scatter_domain_dict, gather_result_dict
-        _rank = _dist.get_rank()
-        _ws = _dist.get_world_size()
-        d_local = scatter_domain_dict(d, _rank, _ws)
         # With FSDP, all ranks must iterate the same number of times in
         # CROWN-optimized to avoid deadlocking on AllGather.  Disable
         # early-exit mechanisms so every rank runs the full iteration count.
         net.net.set_bound_opts({'optimize_bound_args': {
             'early_stop_patience': int(1e9),
         }})
+
+    if _use_dp:
+        from bab_parallel import scatter_domain_dict, gather_result_dict
+        _rank = _dist.get_rank()
+        _ws = _dist.get_world_size()
+        d_local = scatter_domain_dict(d, _rank, _ws)
         ret_local = net.update_bounds(
             d_local, fix_interm_bounds=fix_interm_bounds,
             stop_criterion_func=lambda x: False,
@@ -156,6 +160,15 @@ def split_domain(net: LiRPANet, domains, d, batch, stats=None,
         )
         ret = gather_result_dict(ret_local, _ws)
         del d_local, ret_local
+    elif _dp_active:
+        # Batch too small to split — all ranks process the full batch.
+        ret = net.update_bounds(
+            d, fix_interm_bounds=fix_interm_bounds,
+            stop_criterion_func=lambda x: False,
+            multi_spec_keep_func=multi_spec_keep_func_all,
+            beta_bias=branching_points is not None,
+            enable_clip_domains=enable_clip_domains,
+        )
     else:
         ret = net.update_bounds(
             d, fix_interm_bounds=fix_interm_bounds,
