@@ -126,6 +126,23 @@ torchrun --nproc_per_node=2 ../experiments/fsdp_crown/run_abcrown_fsdp.py \
   --config ../experiments/fsdp_crown/mnist_256x6.yaml
 ```
 
+### Верификация ViT (VNN-COMP 2023)
+
+```bash
+cd /root/cmc-diploma && git pull && source .venv/bin/activate
+cd alpha-beta-CROWN/complete_verifier
+
+# Single GPU (baseline):
+python ../experiments/fsdp_crown/run_abcrown_fsdp.py --config /tmp/vit_test.yaml
+
+# FSDP=2:
+torchrun --nproc_per_node=2 ../experiments/fsdp_crown/run_abcrown_fsdp.py \
+  --config /tmp/vit_test.yaml
+
+# ViT benchmark хранится в /cmc-diploma/vit_benchmark/
+# Конфиг /tmp/vit_test.yaml указывает на pgd_2_3_16 + prop_7715
+```
+
 ### Отладка NCCL
 
 ```bash
@@ -175,10 +192,14 @@ torchrun --nproc_per_node=2 ../experiments/fsdp_crown/run_abcrown_fsdp.py \
 | **Domain-Parallel BaB** | |
 | `complete_verifier/bab_parallel.py` | scatter_domain_dict, gather_result_dict |
 | `complete_verifier/bab.py` | Интеграция DP в split_domain + anti-deadlock |
+| **JIT batch-dim fix (для ViT и других ONNX моделей с Shape ops)** | |
+| `auto_LiRPA/auto_LiRPA/operators/reshape.py` | BoundReshape: замена JIT-baked batch dim |
+| `auto_LiRPA/auto_LiRPA/operators/constant.py` | BoundConstantOfShape: замена JIT-baked batch dim |
+| `auto_LiRPA/auto_LiRPA/operators/slice_concat.py` | BoundConcat: expand batch=1 до фактического batch |
 | **Общие** | |
 | `auto_LiRPA/auto_LiRPA/backward_bound.py` | CROWN backward (TP zone logic + FSDP hooks) |
 | `auto_LiRPA/auto_LiRPA/interval_bound.py` | IBP forward (isinstance fix + FSDP hooks) |
-| `auto_LiRPA/auto_LiRPA/bound_general.py` | BoundedModule.__init__ (JIT trace + forward) |
+| `auto_LiRPA/auto_LiRPA/bound_general.py` | BoundedModule (JIT trace, forward, _batch_size propagation) |
 | `complete_verifier/beta_CROWN_solver.py` | LiRPANet (FSDP auto-hook в __init__) |
 
 ## TODO
@@ -190,4 +211,5 @@ torchrun --nproc_per_node=2 ../experiments/fsdp_crown/run_abcrown_fsdp.py \
 6. ✅ Зафиксировать результаты FSDP в тексте диплома
 7. ✅ Интеграция FSDP с полной верификацией (β-CROWN + BaB)
 8. ✅ Domain-Parallel BaB: scatter/gather доменов + anti-deadlock
-9. Зафиксировать результаты DP+FSDP BaB в тексте диплома
+9. ✅ FSDP-верификация ViT (VNN-COMP 2023): CROWN bounds идентичны, BaB работает
+10. Зафиксировать результаты DP+FSDP BaB и ViT в тексте диплома

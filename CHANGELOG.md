@@ -1,5 +1,44 @@
 # Changelog
 
+## 2026-04-07 — FSDP-верификация Vision Transformer (ViT)
+
+### Что сделано
+
+Успешно запущена FSDP-верификация (complete verification, BaB) на модели Vision Transformer из VNN-COMP 2023 (`pgd_2_3_16`, 2 transformer-блока, 3 heads, ~75K параметров). Для этого потребовалось исправить обработку динамических batch-размеров в auto_LiRPA.
+
+### Проблема: JIT-трассировка и динамические формы
+
+При конвертации ONNX-модели ViT в auto_LiRPA используется `torch.jit.trace`, который превращает `Shape(input)` → `Slice` → `Concat` цепочки в константы с batch=1. Когда BaB увеличивает batch (разбиение доменов), batch-размер в reshape-целях остаётся равным 1, что приводит к ошибкам формы тензоров.
+
+Пример: `Conv [2, 48, 2, 2] → Reshape [1, 48, -1] → [1, 48, 8]` вместо `[2, 48, 4]`.
+
+### Исправления
+
+| Файл | Изменение |
+|------|-----------|
+| `auto_LiRPA/operators/reshape.py` | `BoundReshape.forward()`: замена shape[0] на фактический batch_size при несовпадении с JIT-baked значением |
+| `auto_LiRPA/operators/constant.py` | `BoundConstantOfShape.forward()`: аналогичная коррекция batch-размера в аргументе формы |
+| `auto_LiRPA/operators/slice_concat.py` | `BoundConcat.forward()`: expand тензоров с batch=1 до max_batch перед `torch.cat` (для JIT-baked констант вроде cls_token expansion) |
+| `auto_LiRPA/bound_general.py` | Хранение `_batch_size` в `set_input()` и передача в операторы через `get_forward_value()` |
+
+### Результаты: pgd_2_3_16, prop_7715 (VNN-COMP 2023)
+
+| Метрика | Single GPU | FSDP 2GPU |
+|---------|-----------|-----------|
+| Результат | timeout (100s) | timeout (100s) |
+| CROWN bounds | `-2.195, 3.895, 4.679, ...` | `-2.195, 3.895, 4.679, ...` **(идентичны)** |
+| Alpha-CROWN bound | -0.626 | -0.661 |
+| Specs verified (incomplete) | 8 / 9 | 8 / 9 |
+| BaB rounds | 32 | 24 |
+| Domains visited | ~13 000 | ~1 278 |
+| Peak GPU memory | 10 356 MB | 1 382 MB / rank |
+
+**Корректность:** CROWN bounds побитово идентичны между single GPU и FSDP 2GPU. Alpha-CROWN отличается незначительно из-за разных условий ранней остановки (FSDP отключает early_stop_patience для синхронизации AllGather).
+
+**Память:** FSDP использует ~7.5× меньше памяти на GPU (частично из-за отключённого auto_enlarge_batch_size в FSDP-режиме, необходимого для синхронизации итераций).
+
+**Производительность:** Single GPU исследует ~10× больше доменов за тот же timeout благодаря увеличенным batch-размерам и отсутствию AllGather-overhead.
+
 ## 2026-04-07 — Domain-Parallel BaB: полная верификация на нескольких GPU
 
 ### Что сделано
