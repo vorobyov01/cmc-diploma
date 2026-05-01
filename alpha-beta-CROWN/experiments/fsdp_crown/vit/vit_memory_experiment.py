@@ -68,27 +68,18 @@ class MultiHeadSelfAttention(nn.Module):
         return self.out(out)
 
 
-class TokenBN1d(nn.Module):
-    """BatchNorm1d that normalizes across (B*N) for each feature channel.
-
-    Reshape [B, N, D] -> [B*N, D] -> BN -> [B, N, D]. Mirrors what the
-    VNN-COMP ViT does (BatchNorm replacing LayerNorm).
-    """
-    def __init__(self, dim: int):
-        super().__init__()
-        self.bn = nn.BatchNorm1d(dim)
-
-    def forward(self, x):
-        B, N, D = x.shape
-        return self.bn(x.reshape(B * N, D)).reshape(B, N, D)
-
-
 class TransformerBlock(nn.Module):
+    """ViT block without normalization layers.
+
+    auto_LiRPA gets confused when a Reshape collapses the batch dim into
+    the token dim (e.g. ``[B, N, D] -> [B*N, D]`` inside a BN/LN), so for
+    the memory experiment we skip normalization entirely. The resulting
+    ops (Linear, MatMul, Softmax, ReLU, Reshape over heads only,
+    Transpose) are all well supported.
+    """
     def __init__(self, dim: int, heads: int, mlp_ratio: int = 4):
         super().__init__()
-        self.norm1 = TokenBN1d(dim)
         self.attn = MultiHeadSelfAttention(dim, heads)
-        self.norm2 = TokenBN1d(dim)
         self.mlp = nn.Sequential(
             nn.Linear(dim, dim * mlp_ratio),
             nn.ReLU(),
@@ -96,8 +87,8 @@ class TransformerBlock(nn.Module):
         )
 
     def forward(self, x):
-        x = x + self.attn(self.norm1(x))
-        x = x + self.mlp(self.norm2(x))
+        x = x + self.attn(x)
+        x = x + self.mlp(x)
         return x
 
 
@@ -113,7 +104,6 @@ class TinyViT(nn.Module):
         self.blocks = nn.ModuleList(
             [TransformerBlock(dim, heads) for _ in range(depth)]
         )
-        self.norm = TokenBN1d(dim)
         self.head = nn.Linear(dim, num_classes)
 
     def forward(self, x):
@@ -123,7 +113,6 @@ class TinyViT(nn.Module):
         x = x + self.pos_embed
         for blk in self.blocks:
             x = blk(x)
-        x = self.norm(x)
         x = x.mean(dim=1)                           # global average pool
         return self.head(x)
 
