@@ -29,12 +29,12 @@
 %Стандартный стиль оформления
 \makepagestyle{standart}
 %Настройка верхнего колонтитула
-\makeevenhead{standart}{}{\thepage}{}  % номер по центру колонтитула
-\makeoddhead{standart}{}{\thepage}{}
+\makeevenhead{standart}{}{}{}
+\makeoddhead{standart}{}{}{}
 
 %Настройка нижнего колонтитула
-\makeevenfoot{standart}{}{}{}
-\makeoddfoot{standart}{}{}{}
+\makeevenfoot{standart}{}{\thepage}{}  % номер по центру нижнего колонтитула
+\makeoddfoot{standart}{}{\thepage}{}
 
 %Ассоциируем новый стиль со встроенным стилем plain
 \aliaspagestyle{plain}{standart}
