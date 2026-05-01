@@ -378,7 +378,8 @@ def backward_general(
                 start_shape = None
 
             _fsdp_gathered = []
-            if isinstance(l, BoundLinear):
+            from .operators.convolution import BoundConv
+            if isinstance(l, (BoundLinear, BoundConv)):
                 from .fsdp_utils import fsdp_gather_node, fsdp_free_node
                 for inp in l.inputs:
                     if getattr(inp, '_fsdp_world_size', 0) > 1:

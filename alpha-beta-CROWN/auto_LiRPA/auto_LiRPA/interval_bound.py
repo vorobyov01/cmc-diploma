@@ -59,7 +59,8 @@ def IBP_general(self: 'BoundedModule', node=None, C=None,
             # merge the last BoundLinear node with the specification, available
             # when weights of this layer are not perturbed
             ret = node.interval_propagate(*inp, C=C)
-            if isinstance(node, BoundLinear):
+            from .operators.convolution import BoundConv
+            if isinstance(node, (BoundLinear, BoundConv)):
                 from .fsdp_utils import fsdp_free_node
                 for n_pre in node.inputs:
                     if getattr(n_pre, '_fsdp_world_size', 0) > 1:
@@ -68,7 +69,8 @@ def IBP_general(self: 'BoundedModule', node=None, C=None,
             return ret
         else:
             node.interval = node.interval_propagate(*inp)
-            if isinstance(node, BoundLinear):
+            from .operators.convolution import BoundConv
+            if isinstance(node, (BoundLinear, BoundConv)):
                 from .fsdp_utils import fsdp_free_node
                 for n_pre in node.inputs:
                     if getattr(n_pre, '_fsdp_world_size', 0) > 1:

@@ -1,9 +1,18 @@
 """Fully-Sharded Data Parallelism (FSDP) utilities for auto_LiRPA verification.
 
-FSDP shards each BoundLinear's weight across GPUs.  Before any operation
-that needs the full weight (IBP forward, CROWN backward), the weight is
-reconstructed via AllGather *per-layer*, then freed immediately after.
+FSDP shards each BoundLinear and BoundConv's weight across GPUs.  Before any
+operation that needs the full weight (IBP forward, CROWN backward), the weight
+is reconstructed via AllGather *per-layer*, then freed immediately after.
 At any point, only one full weight is in GPU memory.
+
+Sharded layer types:
+    - BoundLinear: weight shape [out_features, in_features], shard dim 0.
+    - BoundConv:   weight shape [out_channels, in_channels, kH, kW],
+                   shard dim 0 (out_channels).
+
+Bias tensors are not sharded (they are 1D and skipped by the shape check).
+Both layer types share the same shard / gather / free logic because dim 0
+is the natural ``out`` axis in both cases.
 
 Unlike Tensor Parallelism, FSDP introduces *no* accuracy loss -- the
 computation is mathematically identical to single-GPU.
@@ -34,11 +43,14 @@ def fsdp_shard_bounded_module(model: 'BoundedModule', world_size: int,
             refresh the computation graph shapes after sharding.
     """
     from .operators.linear import BoundLinear
+    from .operators.convolution import BoundConv
     from .operators.leaf import BoundParams
 
+    shardable_types = (BoundLinear, BoundConv)
     sharded_count = 0
+    sharded_bytes = 0
     for node in model.nodes():
-        if not isinstance(node, BoundLinear):
+        if not isinstance(node, shardable_types):
             continue
         if len(node.inputs) < 2:
             continue
@@ -46,12 +58,19 @@ def fsdp_shard_bounded_module(model: 'BoundedModule', world_size: int,
         if not isinstance(w_node, BoundParams):
             continue
 
-        W = w_node.param.data  # (out_features, in_features)
+        # Guard against double sharding when a BoundParams is referenced
+        # by more than one consumer (rare, but possible).
+        if getattr(w_node, '_fsdp_world_size', 0) > 1:
+            continue
+
+        W = w_node.param.data  # Linear: [out, in].  Conv: [out_c, in_c, kH, kW].
         if W.ndim < 2 or W.shape[0] % world_size != 0:
             continue
 
         chunk = W.shape[0] // world_size
         shard = W[rank * chunk : (rank + 1) * chunk].contiguous()
+
+        sharded_bytes += (W.numel() - shard.numel()) * W.element_size()
 
         w_node.param = nn.Parameter(shard, requires_grad=W.requires_grad)
         w_node._fsdp_world_size = world_size
@@ -63,8 +82,8 @@ def fsdp_shard_bounded_module(model: 'BoundedModule', world_size: int,
         sharded_count += 1
 
     if rank == 0:
-        print(f"[FSDP] Sharded {sharded_count} weight matrices across "
-              f"{world_size} GPUs")
+        print(f"[FSDP] Sharded {sharded_count} weight tensors across "
+              f"{world_size} GPUs (saved {sharded_bytes / 2**20:.1f} MB / rank)")
 
     # Refresh graph shapes with full weights, then free them.
     if dummy_input is not None:
