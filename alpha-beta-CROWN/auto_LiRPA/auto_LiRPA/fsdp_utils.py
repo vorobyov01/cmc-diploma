@@ -119,14 +119,21 @@ def fsdp_gather_node(node):
 
 
 def fsdp_free_node(node):
-    """Free gathered weight on a BoundParams, returning to sharded state."""
+    """Free gathered weight on a BoundParams, returning to sharded state.
+
+    We *delete* the cached attributes (rather than setting them to None) so
+    that downstream ``hasattr(...)`` checks correctly trigger a re-gather on
+    the next access (e.g. when init_alpha runs IBP multiple times, or when a
+    BoundParams feeds into more than one Conv/Linear layer).
+    """
     ws = getattr(node, '_fsdp_world_size', 0)
     if ws <= 1:
         return
-    node.forward_value = None
-    node.lower = None
-    node.upper = None
-    node.interval = None
+    for name in ('forward_value', 'lower', 'upper', 'interval'):
+        try:
+            delattr(node, name)
+        except AttributeError:
+            pass
 
 
 def fsdp_free_gathered_weights(model: 'BoundedModule'):
