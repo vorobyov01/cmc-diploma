@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/tmp/podsh:*)",
+      "Bash(curl -sL *)",
+      "Bash(curl -fsSL *)",
+      "Bash(curl -sIL *)",
+      "Bash(curl -sI *)",
+      "Bash(curl -LsSf *)",
+      "Bash(make build)",
+      "Bash(make build *)",
+      "Bash(make clear)",
+      "Bash(make clear *)",
+      "Read(//tmp/**)",
+      "Read(//private/tmp/**)"
+    ]
+  }
+}

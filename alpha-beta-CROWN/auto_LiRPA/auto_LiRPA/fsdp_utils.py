@@ -106,7 +106,7 @@ def fsdp_gather_node(node):
     ws = getattr(node, '_fsdp_world_size', 0)
     if ws <= 1:
         return
-    if node.forward_value is not None:
+    if getattr(node, 'forward_value', None) is not None:
         return  # already gathered
     param = node.param.data
     parts = [torch.empty_like(param) for _ in range(ws)]
