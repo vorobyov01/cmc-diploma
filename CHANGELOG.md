@@ -55,6 +55,54 @@ batch, без early-stop / pruning-in-iteration / auto-enlarge. Это позв�
 На новом поде (2× A40 на PCIe, без NVLink) NCCL P2P зависает.
 Обходное решение: `NCCL_P2P_DISABLE=1` перед `torchrun`.
 
+## 2026-05-01 — Честное сравнение FSDP в верификации ViT и попытка показать экономию
+
+### Что сделано
+
+1. Скачан VNN-COMP'23 ViT (`pgd_2_3_16`, `ibp_3_3_8`) +
+   `experiments/fsdp_crown/vit/{download_vit.sh, vit_pgd_fair.yaml}`.
+2. Прогнано честное сравнение на `pgd_2_3_16` (10 раундов BaB, fixed batch=32,
+   force_synchronous): **78 доменов на обоих режимах, peak 1 020 МБ обе
+   стороны**. Старые «7.5×» экономии (10 356 vs 1 382 МБ) были тем же
+   артефактом auto-enlarge_batch_size, что и для MNIST-FC.
+3. Сгенерирован «реалистичный» по размеру весов MLP
+   (`experiments/fsdp_crown/wide_mlp/create_wide_mlp.py`,
+   `wide_mlp_4096x4.onnx`, 53.6 М параметров, ~204 МБ весов) +
+   YAML-конфиги `wide_mlp_fair.yaml` (BaB) и `wide_mlp_incomplete.yaml`.
+4. Прогнано на нём: \\
+   - **BaB fair (batch=64, max_iterations=5):** single peak 4 199 МБ vs.
+     FSDP=2 4 748 МБ/rank — **FSDP проигрывает на 13%** из-за overhead
+     AllGather полной матрицы (64 МБ за раз) поверх α/β-оптимизационных тензоров.
+   - **incomplete (CROWN, batch=1):** single 4 199 МБ vs. FSDP=2 4 748 МБ/rank —
+     тот же knock-on overhead в abcrown-pipeline.
+5. Воспроизведён прямой `compute_bounds(CROWN)` через
+   `experiments/fsdp_crown/memory_experiment.py`: на широких MLP экономия
+   **34–39%** peak GPU памяти (h=4096..8192, d=4..8), bounds побитово идентичны.
+6. Написан `vit_memory_experiment.py` с собственной TinyViT (без norm,
+   без BatchNorm-on-tokens). Запуск через CROWN/IBP упирается в softmax
+   (`BoundReduceMax/BoundReciprocal` не поддержаны для возмущённых индексов
+   без adhoc-tuning, как в `exp_configs/vnncomp23/vit.yaml`). Скрипт оставлен
+   в репозитории как отправная точка для дальнейшей работы.
+
+### Дополнительно
+
+- `auto_LiRPA/operators/reshape.py` — патч JIT-baked batch-dim теперь
+  применяется только когда `prod(new_shape) == x.numel()`. Иначе
+  reshape вида `[B, N, D] -> [B*N, D]` ломался: shape[0] становился
+  равным `B` вместо `B*N`.
+
+### Итог для слайдов
+
+- **Эксп.~4** (incomplete-верификация на широких MLP, прямой
+  `compute_bounds`): 34–39% экономия — *настоящий* результат FSDP.
+- **Эксп.~5** (BaB на mnist-net_256x6): идентичный workload, FSDP
+  даёт +4 МБ overhead AllGather, экономии нет (модель слишком мелкая).
+- **Эксп.~6** (BaB на VNN-COMP ViT pgd_2_3_16): то же — workload идентичен,
+  экономии нет (веса 0.3 МБ vs $A$-матрицы 1 ГБ).
+- В BaB-режиме на крупных моделях FSDP остаётся способом
+  *поместить* модель в память нескольких GPU — независимая полезная
+  функциональность, отдельная от прямой экономии в incomplete.
+
 ## 2026-04-07 — FSDP-верификация Vision Transformer (ViT)
 
 ### Что сделано
