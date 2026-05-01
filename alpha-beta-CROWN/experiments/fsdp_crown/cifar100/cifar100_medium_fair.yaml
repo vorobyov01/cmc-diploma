@@ -2,7 +2,7 @@ model:
   onnx_path: ../experiments/fsdp_crown/cifar100/onnx/CIFAR100_resnet_medium.onnx
   onnx_optimization_flags: ["merge_bn"]
 specification:
-  vnnlib_path: ../experiments/fsdp_crown/cifar100/vnnlib/CIFAR100_resnet_medium_prop_idx_3267_sidx_4884_eps_0.0039.vnnlib
+  vnnlib_path: ../experiments/fsdp_crown/cifar100/vnnlib/CIFAR100_resnet_medium_prop_idx_116_sidx_8002_eps_0.0039.vnnlib
 attack:
   pgd_order: skip
 solver:
