@@ -359,12 +359,221 @@ MLP $h{=}4096$, $d{=}8$  &  16\,726 & 10\,232 & 39 \\
 При $d = 8$ доля весов в пиковой памяти выше, 
 и экономия увеличивается до 39\%.
 
-\textbf{3. Сравнение с TP.} TP (Эксперимент~1) 
-достигает $\sim\!2\times$ снижения пиковой памяти, 
-поскольку шардирует \textit{и веса, и A-матрицы} 
-(A-матрицы проходят через слои с уменьшенной 
-размерностью $h/P$). Однако TP теряет точность bounds 
-для глубоких моделей. FSDP представляет собой 
-компромиссный подход: умеренная экономия памяти 
-при \textit{идеальной} точности bounds, что критично 
+\textbf{3. Сравнение с TP.} TP (Эксперимент~1)
+достигает $\sim\!2\times$ снижения пиковой памяти,
+поскольку шардирует \textit{и веса, и A-матрицы}
+(A-матрицы проходят через слои с уменьшенной
+размерностью $h/P$). Однако TP теряет точность bounds
+для глубоких моделей. FSDP представляет собой
+компромиссный подход: умеренная экономия памяти
+при \textit{идеальной} точности bounds, что критично
 для полной верификации ($\beta$-CROWN).
+
+\subsection{Эксперимент 6: FSDP в полной верификации (BaB)}
+\label{sec:exp6}
+
+\subsubsection{Мотивация и корректировка методологии}
+
+Полная верификация ($\beta$-CROWN~\cite{betaCROWN2021} +
+Branch-and-Bound, BaB) существенно отличается от неполной:
+она итеративно разбивает входное пространство на поддомены,
+оптимизирует $\alpha$- и $\beta$-параметры для каждого
+поддомена и хранит дерево поддоменов в памяти GPU.
+Основными потребителями памяти здесь становятся
+alpha-тензоры~--- per-neuron наклоны ReLU-аппроксимации
+$\alpha_{i,k} \in [0, 1]$, размерность которых равна
+$(\text{число слоёв}) \times (\text{число спецификаций}) \times
+(\text{batch}) \times (\text{нейронов в слое})$.
+
+При разработке честного сравнения обнаружилось, что
+предварительные результаты содержали системный артефакт:
+режим single-GPU использовал \texttt{auto\_enlarge\_batch\_size}
+(автоматически увеличивал batch, заполняя GPU) и
+\texttt{pruning\_in\_iteration} (раннее завершение раунда),
+тогда как FSDP-режим эти оптимизации отключал для
+синхронизации AllGather. В итоге сравнивались
+\textit{разные нагрузки}, из-за чего получалось ложное
+«27-кратное» преимущество FSDP.
+
+Для устранения артефакта реализована опция
+\texttt{bab.force\_synchronous} (CLI: \texttt{--force\_synchronous}),
+которая принудительно включает тот же код-путь BaB,
+что и при активном FSDP: фиксированный batch, без
+\texttt{auto\_enlarge\_batch\_size}, без
+\texttt{early\_stop}, без \texttt{pruning\_in\_iteration}.
+Это обеспечивает \textit{идентичный workload} обоих режимов.
+
+\subsubsection{Методология}
+
+Использовалась модель \texttt{mnist-net\_256x6}
+($6$ полносвязных слоёв ширины $256$, $\sim\!1.5$~МБ весов)
+из VNN-COMP 2022, свойство с $\varepsilon = 0.05$.
+Параметры: ровно $10$ раундов BaB, два значения batch
+($512$ и $4096$), одинаковые для single-GPU и FSDP$=$2.
+
+\subsubsection{Результаты}
+
+\begin{table}[htbp]
+\centering
+\caption{Честное сравнение FSDP$=$2 и single-GPU в BaB
+на \texttt{mnist-net\_256x6}, $\varepsilon{=}0.05$,
+ровно 10 раундов. Нагрузка идентична.}
+\label{tab:fsdp-bab}
+\begin{tabular}{lcccc}
+\toprule
+Конфигурация & Batch & Domains & Rounds & Peak GPU, МБ \\
+\midrule
+Single GPU  &   512 &   6\,236 & 10 &     211.7 \\
+FSDP$=$2    &   512 &   6\,236 & 10 & 215.7 / rank \\
+Single GPU  & 4\,096 &  49\,888 & 10 &   1\,537.3 \\
+FSDP$=$2    & 4\,096 &  49\,888 & 10 & 1\,541.4 / rank \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Анализ результатов}
+
+\texttt{mnist-net\_256x6} имеет $\sim\!1.5$~МБ весов при
+общем пиковом расходе $\sim\!1.5$~ГБ. Веса составляют
+менее $0.1\%$ пиковой памяти: всё остальное ---
+alpha/beta-тензоры и история поддоменов. Шардирование
+$1.5$~МБ не даёт измеримого выигрыша; AllGather добавляет
+$\sim\!4$~МБ накладных расходов.
+
+\textbf{Вывод:} FSDP не вредит точности и не изменяет
+workload полной верификации, но и не экономит память
+на малых моделях, где веса пренебрежимо малы по сравнению
+с alpha-тензорами.
+
+\subsection{Эксперимент 7: FSDP с ViT из VNN-COMP'23}
+\label{sec:exp7}
+
+\subsubsection{Модель и JIT-совместимость}
+
+Модель \texttt{pgd\_2\_3\_16} ($2$ трансформер-блока,
+$3$ heads, $\sim\!75$K параметров, $\sim\!0.3$~МБ весов)
+из VNN-COMP 2023. В отличие от MLP, трансформер
+использует динамические reshape-операции, несовместимые
+с JIT-трассировкой, которую применяет auto\_LiRPA
+для построения вычислительного графа.
+
+Для поддержки ViT потребовалось устранить три класса
+JIT-несовместимостей в \texttt{auto\_LiRPA}:
+\begin{enumerate}
+    \item \textbf{\texttt{BoundReshape}}: при JIT-трассировке
+    размерность батча «запекается» в граф как константа.
+    Исправление: при условии, что общее число элементов
+    совпадает, первая ось shape заменяется на текущий
+    batch-size. Проверка $\prod(\text{new\_shape}) = x.\text{numel}()$
+    предотвращает некорректную замену при reshape вида
+    $[B, N, D] \to [B \cdot N, D]$.
+    \item \textbf{\texttt{BoundConcat}}: JIT фиксировал
+    число конкатенируемых тензоров как константу.
+    \item \textbf{\texttt{BoundConstantOfShape}}: замена
+    JIT-запечённой формы на текущую.
+\end{enumerate}
+
+\subsubsection{Результаты}
+
+Честное сравнение (те же fair-условия:
+\texttt{force\_synchronous}, batch$=$32, max\_iterations$=$10),
+свойство \texttt{prop\_4021}:
+
+\begin{table}[htbp]
+\centering
+\caption{Честное сравнение FSDP$=$2 и single-GPU
+на ViT \texttt{pgd\_2\_3\_16}, VNN-COMP'23}
+\label{tab:fsdp-vit}
+\begin{tabular}{lccc}
+\toprule
+Конфигурация & Domains & Rounds & Peak GPU, МБ \\
+\midrule
+Single GPU & 78 & 10 & 1\,020.1 \\
+FSDP$=$2   & 78 & 10 & 1\,020.1 / rank \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Та же картина, что в Эксперименте~6: веса ($0.3$~МБ)
+ничтожны на фоне A-матриц аттенции ($\sim\!1$~ГБ).
+Ключевой результат~--- сам факт корректного запуска
+ViT в $\alpha,\beta$-CROWN с FSDP: bounds идентичны
+single-GPU, workload воспроизводим.
+
+\subsection{Эксперимент 8: расширение FSDP на свёрточные слои}
+\label{sec:exp8}
+
+\subsubsection{Реализация}
+
+Предыдущие эксперименты охватывали только полносвязные
+слои (\texttt{BoundLinear}). Для применения к реальным
+сетям компьютерного зрения (ResNet, VGG) FSDP расширен
+на свёрточные слои (\texttt{BoundConv}).
+
+Весовые тензоры свёртки имеют форму
+$[C_\text{out}, C_\text{in}, k_H, k_W]$; шардирование
+выполняется по измерению $0$ (выходные каналы $C_\text{out}$)
+--- аналогично шардированию по строкам у \texttt{BoundLinear}.
+Это единственное измерение, по которому слой является
+«линейным по выходу» и по которому AllGather корректно
+восстанавливает полную матрицу.
+
+Изменения коснулись трёх компонентов:
+\begin{enumerate}
+    \item \texttt{fsdp\_utils.py}~--- \texttt{shardable\_types
+    = (BoundLinear, BoundConv)}, защита от двойного
+    шардирования, исправление \texttt{fsdp\_free\_node}
+    (замена \texttt{= None} на \texttt{delattr} для
+    корректной семантики \texttt{hasattr}).
+    \item \texttt{backward\_bound.py}~--- AllGather/free
+    для \texttt{BoundConv} в CROWN backward pass.
+    \item \texttt{interval\_bound.py}~--- free-хуки
+    для \texttt{BoundConv} после IBP propagate.
+\end{enumerate}
+
+\subsubsection{Методология}
+
+Использовались модели ResNet из VNN-COMP 2024
+(CIFAR-100): \texttt{CIFAR100\_resnet\_medium} и
+\texttt{CIFAR100\_resnet\_large}. Fair-условия:
+\texttt{force\_synchronous}, batch$=$64, max\_iterations$=$5.
+
+\subsubsection{Результаты}
+
+\begin{table}[htbp]
+\centering
+\caption{Честное сравнение FSDP$=$2 и single-GPU
+на CIFAR-100 ResNet (VNN-COMP'24), BoundConv-шардирование}
+\label{tab:fsdp-conv}
+\begin{tabular}{llcccc}
+\toprule
+Модель & Конфиг & Domains & Rounds & Peak, МБ & $|\Delta lb|$ \\
+\midrule
+ResNet-medium & Single GPU & 130 & 5 &   960 & --- \\
+ResNet-medium & FSDP$=$2   & 130 & 5 &   930 / rank & 0.00 \\
+ResNet-large  & Single GPU &   0\textsuperscript{*} & 0 & 4\,610.6 & --- \\
+ResNet-large  & FSDP$=$2   &   0\textsuperscript{*} & 0 & 4\,641.5 / rank & 0.00 \\
+\bottomrule
+\end{tabular}
+\end{table}
+{\small\textsuperscript{*}Свойство верифицировано
+на стадии $\alpha$-CROWN init; BaB не потребовался.}
+
+\subsubsection{Анализ результатов}
+
+\textbf{Корректность.} Bounds побитово идентичны для
+обеих моделей~--- реализация BoundConv-шардирования
+арифметически верна.
+
+\textbf{Память.} ResNet-large содержит $\sim\!95$~МБ
+свёрточных весов, однако $\alpha$-тензоры занимают
+более $4$~ГБ. Причина: $\alpha$-тензоры не шардируются;
+каждый GPU хранит полный набор per-neuron slopes
+для всего batch. При $\alpha$-CROWN overhead AllGather
+($\sim\!30$~МБ) превышает экономию от шардирования
+$95$~МБ весов на $P=2$.
+
+\textbf{Узкое место.} В режиме $\alpha$-CROWN+BaB
+узкое место по памяти~--- не веса, а $\alpha$-тензоры.
+Для получения заметной экономии необходимо шардировать
+$\alpha$-тензоры, что является следующим шагом разработки.
