@@ -18,7 +18,7 @@
 
 Подключение:
 ```bash
-ssh e5wf3lg2dxaoi6-64411394@ssh.runpod.io -i /Users/svorobyov/Documents/cmc_mmp/vastai
+ssh 1u5y6uqld2ntt0-64411be8@ssh.runpod.io -i /Users/svorobyov/Documents/cmc_mmp/vastai
 ```
 
 ## Полезные команды
@@ -27,7 +27,7 @@ ssh e5wf3lg2dxaoi6-64411394@ssh.runpod.io -i /Users/svorobyov/Documents/cmc_mmp/
 
 ```bash
 # Подключение
-ssh e5wf3lg2dxaoi6-64411394@ssh.runpod.io -i /Users/svorobyov/Documents/cmc_mmp/vastai
+ssh 1u5y6uqld2ntt0-64411be8@ssh.runpod.io -i /Users/svorobyov/Documents/cmc_mmp/vastai
 
 # Pull и активация окружения
 cd /root/cmc-diploma && git pull && source .venv/bin/activate && cd alpha-beta-CROWN/auto_LiRPA
