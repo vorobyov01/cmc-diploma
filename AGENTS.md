@@ -171,6 +171,35 @@ torchrun --nproc_per_node=2 ../experiments/fsdp_crown/run_abcrown_fsdp.py \
   --config ../experiments/fsdp_crown/mnist_fc_bab_hard.yaml
 ```
 
+### Честное сравнение FSDP vs single в BaB (одинаковый workload)
+
+```bash
+cd /root/cmc-diploma && git pull && source .venv/bin/activate
+cd alpha-beta-CROWN/complete_verifier
+
+# На pod без NVLink обязательно: NCCL_P2P_DISABLE=1
+
+# Single GPU, batch=512:
+CUDA_VISIBLE_DEVICES=0 python ../experiments/fsdp_crown/run_abcrown_fsdp.py \
+  --config ../experiments/fsdp_crown/mnist_fc_fair_512.yaml
+
+# FSDP=2, batch=512 (тот же конфиг — force_synchronous уже включён):
+NCCL_P2P_DISABLE=1 torchrun --nproc_per_node=2 \
+  ../experiments/fsdp_crown/run_abcrown_fsdp.py \
+  --config ../experiments/fsdp_crown/mnist_fc_fair_512.yaml
+
+# То же для batch=4096:
+CUDA_VISIBLE_DEVICES=0 python ../experiments/fsdp_crown/run_abcrown_fsdp.py \
+  --config ../experiments/fsdp_crown/mnist_fc_fair_4096.yaml
+NCCL_P2P_DISABLE=1 torchrun --nproc_per_node=2 \
+  ../experiments/fsdp_crown/run_abcrown_fsdp.py \
+  --config ../experiments/fsdp_crown/mnist_fc_fair_4096.yaml
+```
+
+Конфиги фиксируют batch, отключают auto_enlarge / early_stop / pruning_in_iteration
+и ограничивают BaB ровно 10 раундами — оба прогона делают идентичный workload,
+поэтому пиковая память сопоставима напрямую.
+
 ### Ключевые файлы
 
 | Файл | Описание |

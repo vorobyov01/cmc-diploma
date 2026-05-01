@@ -1,5 +1,60 @@
 # Changelog
 
+## 2026-05-01 — Честное сравнение FSDP vs single в полной верификации
+
+### Что обнаружено
+
+Старые результаты «4–27× экономии памяти при DP=2+FSDP в BaB» были артефактом
+несимметричной конфигурации:
+
+- single-GPU выполнял `auto_enlarge_batch_size` и наращивал batch до десятков
+  тысяч, заполняя память;
+- FSDP-режим (`_dp_active`) держал batch фиксированным (нужно для синхронности
+  AllGather), плюс отключал `early_stop` и `pruning_in_iteration`.
+
+В итоге сравнивались **разные нагрузки** — single-GPU считал bounds на огромном
+батче, FSDP — на маленьком. Поэтому single-GPU расходовал много памяти, и
+получалось «27×».
+
+### Что сделано
+
+Добавлена опция `bab.force_synchronous` (CLI: `--force_synchronous`), которая
+заставляет single-GPU пройти ту же ветку, что и `_dp_active`: фиксированный
+batch, без early-stop / pruning-in-iteration / auto-enlarge. Это позволяет
+прогнать оба режима с **идентичным workload** и честно сравнить пиковую память.
+
+| Файл | Изменение |
+|------|-----------|
+| `complete_verifier/arguments.py` | Новый CLI-аргумент `--force_synchronous` (`bab.force_synchronous`) |
+| `complete_verifier/bab.py` | `_sync_mode = _dp_active or arguments.Config['bab']['force_synchronous']` подменяет `_dp_active` в обеих местах |
+| `experiments/fsdp_crown/mnist_fc_fair_512.yaml` | Новый YAML: `batch_size: 512`, `auto_enlarge_batch_size: false`, `pruning_in_iteration: false`, `force_synchronous: true`, `max_iterations: 10` |
+| `experiments/fsdp_crown/mnist_fc_fair_4096.yaml` | Аналогично, `batch_size: 4096` |
+| `experiments/vnncomp_tp/download_mnist_fc.sh` | URL VNN-COMP MNIST-FC переехал на VNN-COMP/vnncomp2022_benchmarks, файлы `.gz` |
+
+### Результаты на mnist-net_256x6, eps=0.05, ровно 10 раундов BaB
+
+| Конфигурация | Batch | Domains | BaB rounds | Peak GPU |
+|--------------|------:|--------:|-----------:|---------:|
+| Single GPU   |   512 |   6 236 |         10 | 211.7 МБ |
+| FSDP=2       |   512 |   6 236 |         10 | 215.7 МБ / rank |
+| Single GPU   | 4 096 |  49 888 |         10 | 1 537.3 МБ |
+| FSDP=2       | 4 096 |  49 888 |         10 | 1 541.4 МБ / rank |
+
+**Корректность:** workload идентичен (тот же batch, число доменов, раундов).
+
+**Память:** на mnist-net_256x6 веса занимают ~1.5 МБ при общем peak ~1.5 ГБ
+(99.9% памяти — A-матрицы и активации). Шардирование 1.5 МБ не даёт измеримой
+экономии, AllGather добавляет ~4 МБ overhead. **FSDP+BaB не даёт выигрыша на
+маленьких моделях**, но и не вредит точности/корректности.
+
+Реальная экономия пиковой памяти от FSDP видна на **широких моделях** (Эксп.~4
+из текста диплома): 34–39% при $h{=}4096{-}8192$, $d{=}4{-}8$.
+
+### Замечание про runpod-инфраструктуру
+
+На новом поде (2× A40 на PCIe, без NVLink) NCCL P2P зависает.
+Обходное решение: `NCCL_P2P_DISABLE=1` перед `torchrun`.
+
 ## 2026-04-07 — FSDP-верификация Vision Transformer (ViT)
 
 ### Что сделано
