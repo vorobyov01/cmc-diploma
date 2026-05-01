@@ -522,6 +522,11 @@ class ConfigHandler:
         self.add_argument("--max_iterations", type=int, default=-1,
                           help='Maximum number of BaB iterations.',
                           hierarchy=h + ["max_iterations"])
+        self.add_argument("--force_synchronous", action='store_true',
+                          help='Force the synchronous DP-mode code path (no early-stop, '
+                               'no pruning_in_iteration, no auto_enlarge_batch_size) even '
+                               'on a single GPU. Used for fair single-vs-FSDP memory comparison.',
+                          hierarchy=h + ["force_synchronous"])
         self.add_argument("--override_timeout", type=float, default=None,
                           help='Override timeout.',
                           hierarchy=h + ["override_timeout"])

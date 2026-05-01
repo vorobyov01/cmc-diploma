@@ -135,13 +135,17 @@ def split_domain(net: LiRPANet, domains, d, batch, stats=None,
 
     import torch.distributed as _dist
     _dp_active = _dist.is_initialized() and _dist.get_world_size() > 1
+    _sync_mode = _dp_active or arguments.Config['bab'].get('force_synchronous', False)
 
-    if _dp_active:
+    if _sync_mode:
         # With FSDP, all ranks must iterate the same number of times in
         # CROWN-optimized to avoid deadlocking on AllGather.  Disable
         # early-exit mechanisms and pruning_in_iteration (which can reduce
         # the batch to 0 and cause reshape errors).
         # Must set via arguments.Config because update_bounds re-reads it.
+        # When force_synchronous=True, single-GPU also takes this path so the
+        # workload (rounds, domains, iterations) matches FSDP exactly for a
+        # fair memory comparison.
         arguments.Config['bab']['pruning_in_iteration'] = False
         net.net.set_bound_opts({'optimize_bound_args': {
             'early_stop_patience': int(1e9),
@@ -536,11 +540,12 @@ def general_bab(net: LiRPANet, x, c, rhs,
     num_domains = len(domains)
     import torch.distributed as _dist
     _dp_active = _dist.is_initialized() and _dist.get_world_size() > 1
+    _sync_mode = _dp_active or arguments.Config['bab'].get('force_synchronous', False)
     vram_ratio = 0.85 if cut_enabled else 0.9
     auto_batch_size = AutoBatchSize(
         batch, net.device, vram_ratio,
         enable=(arguments.Config['solver']['auto_enlarge_batch_size']
-                and not _dp_active))
+                and not _sync_mode))
 
     total_round = 0
     result = None
