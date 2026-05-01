@@ -33,7 +33,10 @@ def IBP_general(self: 'BoundedModule', node=None, C=None,
         sparse_intermediate_bounds_with_ibp is true."""
         if delete_bounds_after_use:
             for n in node_list:
-                del n.interval
+                # Tolerate the case where FSDP's per-layer free hook already
+                # removed the cached interval on a sharded BoundParams.
+                if hasattr(n, 'interval'):
+                    del n.interval
                 n.delete_lower_and_upper_bounds()
 
     if self.bound_opts.get('loss_fusion', False):
