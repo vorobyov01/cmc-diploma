@@ -33,12 +33,30 @@ class BoundReshape(Bound):
         # size (typically 1) into reshape targets. When the actual batch size
         # differs (e.g., during BaB domain splitting), replace the leading
         # dimension so the reshape stays consistent with the input batch.
+        # Important: only override shape[0] when the resulting target has the
+        # same numel as x — otherwise a legitimate reshape that collapses the
+        # batch dim into another (e.g. [B, N, D] -> [B*N, D]) gets mis-edited.
         batch_size = getattr(self, '_batch_size', None)
         if batch_size is None:
             batch_size = x.shape[0] if x.ndim >= 2 else None
         if (batch_size is not None and len(shape) >= 2
                 and shape[0] != batch_size and shape[0] >= 1):
-            shape[0] = batch_size
+            rest = 1
+            negatives = 0
+            for s in shape[1:]:
+                if s == -1:
+                    negatives += 1
+                else:
+                    rest *= s
+            x_numel = int(prod(x.shape))
+            target_numel = int(batch_size) * rest
+            # Replace only if the new shape covers x.numel() exactly,
+            # accounting for an optional single -1 entry.
+            if (negatives == 1 and target_numel != 0
+                    and x_numel % target_numel == 0):
+                shape[0] = batch_size
+            elif negatives == 0 and target_numel == x_numel:
+                shape[0] = batch_size
         for i in range(len(shape)):
             if shape[i] == -1:
                 shape[i] = prod(x.shape) // int(prod(shape[:i]) * prod(shape[(i + 1):]))
