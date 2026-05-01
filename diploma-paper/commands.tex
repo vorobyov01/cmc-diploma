@@ -4,6 +4,9 @@
 %% 			\DeclareMathOperator{\supp}{supp}
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 \hyphenation{Си-дель-ни-кова}
+% Prevent overfull \hbox in paragraphs with long \texttt identifiers.
+% emergencystretch gives LaTeX a last-resort stretch to avoid overflowing the margin.
+\setlength{\emergencystretch}{2em}
 %------------------------------------------------------------------------------------------
 \newcommand{\Def}[1] {
 \begin{definition}

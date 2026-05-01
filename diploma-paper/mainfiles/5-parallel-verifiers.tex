@@ -238,17 +238,17 @@ bounds~--- в отличие от TP, где промежуточные bounds �
 реализованы следующие компоненты:
 
 \begin{enumerate}
-    \item \textbf{Операторы TP:} Пользовательские операторы 
-    \texttt{BoundLinearTP\_Col} и \texttt{BoundLinearTP\_Row}, 
-    наследующие от \texttt{BoundLinear}. Они хранят шардированные 
-    весовые матрицы и добавляют \texttt{AllReduce} в метод 
-    \texttt{bound\_backward}, обеспечивая корректное распространение 
+    \item \textbf{Операторы TP:} Пользовательские операторы
+    \texttt{BoundLinearTP\_Col} и \texttt{BoundLinearTP\_Row}
+    наследуют от \texttt{BoundLinear}, хранят шардированные
+    весовые матрицы и добавляют \texttt{AllReduce} в метод
+    \texttt{bound\_backward}, обеспечивая корректное распространение
     границ через распределённые слои.
     
-    \item \textbf{ONNX-интеграция:} Пользовательские операторы 
-    (\texttt{customOp::TPLinearCol}, \texttt{customOp::TPLinearRow}) 
-    с \texttt{torch.autograd.Function} и ONNX \texttt{symbolic}, 
-    позволяющие JIT-трассировке PyTorch корректно строить 
+    \item \textbf{ONNX-интеграция:} Каждый оператор регистрируется
+    как пользовательская операция ONNX через
+    \texttt{torch.autograd.Function} и метод \texttt{symbolic},
+    что позволяет JIT-трассировке PyTorch корректно строить
     вычислительный граф.
     
     \item \textbf{Автоматическое шардирование:} Функция 
