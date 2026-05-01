@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MODELS_DIR="$SCRIPT_DIR/models"
 mkdir -p "$MODELS_DIR"
 
-BASE_URL="https://github.com/ChristopherBrix/vnncomp2022_benchmarks/raw/main/benchmarks/mnist_fc"
+BASE_URL="https://raw.githubusercontent.com/VNN-COMP/vnncomp2022_benchmarks/main/benchmarks/mnist_fc"
 
 echo "Downloading MNIST-FC models from VNN-COMP 2022..."
 
@@ -16,8 +16,9 @@ for model in mnist-net_256x2 mnist-net_256x4 mnist-net_256x6; do
     if [ -f "$DEST" ]; then
         echo "  $model.onnx already exists, skipping."
     else
-        echo "  Downloading $model.onnx ..."
-        curl -fSL "$BASE_URL/onnx/${model}.onnx" -o "$DEST"
+        echo "  Downloading $model.onnx.gz ..."
+        curl -fSL "$BASE_URL/onnx/${model}.onnx.gz" -o "$DEST.gz"
+        gunzip -f "$DEST.gz"
         echo "  Done."
     fi
 done
@@ -33,16 +34,21 @@ if [ ! -f "$INSTANCES_FILE" ]; then
     curl -fSL "$INSTANCES_URL" -o "$INSTANCES_FILE"
 fi
 
-# Download first vnnlib spec for 256x2
-FIRST_SPEC=$(head -2 "$INSTANCES_FILE" | tail -1 | cut -d',' -f2)
-if [ -n "$FIRST_SPEC" ]; then
-    SPEC_NAME="$(basename "$FIRST_SPEC")"
-    SPEC_DEST="$VNNLIB_DIR/$SPEC_NAME"
-    if [ ! -f "$SPEC_DEST" ]; then
-        echo "Downloading sample vnnlib: $SPEC_NAME ..."
-        curl -fSL "$BASE_URL/$FIRST_SPEC" -o "$SPEC_DEST" || echo "  (failed, not critical)"
+# Download vnnlib specs (gzipped on the new repo)
+for spec in prop_0_0.03 prop_0_0.05; do
+    SPEC_DEST="$VNNLIB_DIR/${spec}.vnnlib"
+    if [ -f "$SPEC_DEST" ]; then
+        echo "  $spec.vnnlib already exists, skipping."
+    else
+        echo "  Downloading $spec.vnnlib.gz ..."
+        if curl -fSL "$BASE_URL/vnnlib/${spec}.vnnlib.gz" -o "$SPEC_DEST.gz"; then
+            gunzip -f "$SPEC_DEST.gz"
+        else
+            echo "  (failed: $spec, not critical)"
+            rm -f "$SPEC_DEST.gz"
+        fi
     fi
-fi
+done
 
 echo ""
 echo "Models downloaded to: $MODELS_DIR"
