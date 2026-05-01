@@ -1,5 +1,46 @@
 # Changelog
 
+## 2026-05-01 — Расширение FSDP на BoundConv и CIFAR-100 ResNet (VNN-COMP'24)
+
+### Что сделано
+
+Шардирование FSDP распространено с `BoundLinear` на `BoundConv` (веса
+`[out_c, in_c, kH, kW]` шардируются по `dim=0` — оси `out_channels`,
+аналогично `out_features` у BoundLinear).
+
+| Файл | Изменение |
+|------|-----------|
+| `fsdp_utils.py` | `shardable_types = (BoundLinear, BoundConv)`; защита от двойного шардирования; `fsdp_free_node` использует `delattr` вместо `= None`; `fsdp_gather_node` использует `getattr(..., None)` |
+| `backward_bound.py` | AllGather/free для `(BoundLinear, BoundConv)` в CROWN backward |
+| `interval_bound.py` | free-хуки для `BoundConv` после IBP; `_delete_unused_bounds` защищена от AttributeError (FSDP мог уже удалить атрибут) |
+| `experiments/fsdp_crown/cifar100/` | `download_cifar100.sh`, `cifar100_medium_fair.yaml`, `cifar100_large_fair.yaml` |
+
+### Результаты на CIFAR-100 ResNet (VNN-COMP'24), fair-условия
+
+`force_synchronous`, одинаковый batch=64, max_iterations=5.
+
+| Модель | Конфигурация | Domains | BaB rounds | Peak GPU |
+|--------|-------------|--------:|-----------:|---------:|
+| ResNet-medium | Single GPU | 130 | 5 | ~960 МБ |
+| ResNet-medium | FSDP=2 | 130 | 5 | ~930 МБ / rank |
+| ResNet-large | Single GPU | 0 (verified at α-CROWN init) | 0 | 4 610.6 МБ |
+| ResNet-large | FSDP=2 | 0 (verified at α-CROWN init) | 0 | 4 641.5 МБ / rank |
+
+**Корректность:** bounds идентичны на обоих режимах.
+
+**Память:** BoundConv-шардирование технически работает, но экономии не даёт.
+ResNet-large весит ~95 МБ весов, однако alpha-тензоры (per-neuron ReLU slopes)
+занимают >4 ГБ и являются узким местом. AllGather-overhead сопоставим с
+экономией от шардирования весов.
+
+### Вывод
+
+FSDP для BoundConv реализован и верифицирован на VNN-COMP'24 CIFAR-100 ResNet.
+Для значимой экономии в BaB-режиме необходимо дополнительно шардировать
+alpha-тензоры — следующий шаг разработки.
+
+---
+
 ## 2026-05-01 — Честное сравнение FSDP vs single в полной верификации
 
 ### Что обнаружено
