@@ -551,19 +551,30 @@ $[C_\text{out}, C_\text{in}, k_H, k_W]$; шардирование
 \midrule
 ResNet-medium & Single GPU & 130 & 5 &   960 & --- \\
 ResNet-medium & FSDP$=$2   & 130 & 5 &   930 / rank & 0.00 \\
-ResNet-large  & Single GPU &   0\textsuperscript{*} & 0 & 4\,610.6 & --- \\
-ResNet-large  & FSDP$=$2   &   0\textsuperscript{*} & 0 & 4\,641.5 / rank & 0.00 \\
+ResNet-large  & Single GPU & \textbf{unsat}\textsuperscript{†} & 0 & 4\,610.6 & --- \\
+ResNet-large  & FSDP$=$2   & \textbf{unsat}\textsuperscript{†} & 0 & 4\,641.5 / rank & 0.00 \\
 \bottomrule
 \end{tabular}
 \end{table}
-{\small\textsuperscript{*}Свойство верифицировано
-на стадии $\alpha$-CROWN init; BaB не потребовался.}
+{\small ResNet-medium: бюджет исчерпан (max\_iterations$=$5),
+результат \emph{unknown}.\\
+\textsuperscript{†}ResNet-large: \textbf{свойство доказано}~---
+$\alpha$-CROWN вычислил min-margin $\ge 0$ без ветвления
+(\emph{verified, unsat}).}
 
 \subsubsection{Анализ результатов}
 
-\textbf{Корректность.} Bounds побитово идентичны для
-обеих моделей~--- реализация BoundConv-шардирования
-арифметически верна.
+\textbf{Корректность и полный результат верификации.}
+Bounds побитово идентичны для обеих моделей.
+Для ResNet-large получен \textit{полный} результат
+верификации (unsat): $\alpha$-CROWN на стадии инициализации
+доказал свойство (min-margin $\ge 0$ для всех выходных
+классов), BaB не потребовался. Это первый в данной работе
+случай, когда верификатор с FSDP завершил задачу с
+гарантированным ответом, а не превысил бюджет.
+Оба режима (single-GPU и FSDP$=$2) вернули идентичный
+результат, что подтверждает корректность реализации
+BoundConv-шардирования в полной цепочке верификации.
 
 \textbf{Память.} ResNet-large содержит $\sim\!95$~МБ
 свёрточных весов, однако $\alpha$-тензоры занимают
