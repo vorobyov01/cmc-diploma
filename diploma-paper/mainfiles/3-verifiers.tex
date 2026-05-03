@@ -14,7 +14,7 @@ $[\mathbf{l}, \mathbf{u}]$ послойно через сеть.
 $$\mathbf{l}_y = W^+\mathbf{l}_x + W^-\mathbf{u}_x + \mathbf{b}, \quad
   \mathbf{u}_y = W^+\mathbf{u}_x + W^-\mathbf{l}_x + \mathbf{b},$$
 где $W^+ = \max(W, 0)$, $W^- = \min(W, 0)$ поэлементно.
-Метод дёшев ($O(n)$, один проход), но с ростом глубины интервалы
+Метод дешевый ($O(n)$, один проход), но с ростом глубины интервалы
 быстро расширяются из-за накопления ошибки овер-аппроксимации.\cite{CROWNPaper}
 
 \textbf{CROWN (Convex Relaxation with Optimized Neurons)} считает
