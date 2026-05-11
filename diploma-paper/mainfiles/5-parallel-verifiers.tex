@@ -182,10 +182,12 @@ FSDP шардирует \textit{только веса}, обеспечивая �
 что позволяет JIT-трассировке PyTorch корректно строить вычислительный
 граф.
 
+\begin{sloppypar}
 Функция \texttt{tp\_shard\_bounded\_module} принимает произвольный
 \texttt{BoundedModule} (включая загруженный из ONNX) и автоматически
 заменяет чередующиеся пары \texttt{BoundLinear} на
 \texttt{BoundLinearTP\_Col/Row}, шардируя весовые матрицы по числу GPU.
+\end{sloppypar}
 
 Между каждой парой Column--Row узлов формируется <<шардированная
 зона>>~--- подграф с уменьшенной размерностью активаций.
@@ -218,12 +220,14 @@ $W \in \mathbb{R}^{C_\text{out} \times C_\text{in} \times k_H \times k_W}$
 Полная матрица возвращается как результат forward-pass и используется
 всеми нижестоящими операциями без модификации.
 
+\begin{sloppypar}
 Хуки \texttt{fsdp\_gather\_node} и \texttt{fsdp\_free\_node}
 интегрированы в \texttt{backward\_general} (CROWN backward) и
 \texttt{IBP\_general} (IBP forward): полная матрица собирается
 непосредственно перед обработкой слоя и освобождается сразу после.
 В каждый момент времени в GPU-памяти находится не более одной полной
 матрицы весов (помимо шардов).
+\end{sloppypar}
 
 \subsubsection{Теоретический анализ расхода памяти}
 \label{sec:fsdp-memory-theory}
@@ -386,6 +390,7 @@ NCCL не передаёт произвольные Python-объекты нап
 \caption{Сравнение Tensor Parallelism, FSDP и Domain Parallelism
 для верификации нейронных сетей}
 \label{tab:parallelism-comparison}
+\resizebox{\linewidth}{!}{%
 \begin{tabular}{lccc}
 \toprule
 Свойство & TP & FSDP & DP \\
@@ -396,7 +401,7 @@ NCCL не передаёт произвольные Python-объекты нап
 Экономия peak-памяти & $\sim\!2\times$ & 34--39\% & $\sim P\times$ (на $\alpha$-тензорах) \\
 Сложность реализации & $\sim$500 строк & $\sim$100 строк & $\sim$150 строк \\
 \bottomrule
-\end{tabular}
+\end{tabular}}
 \end{table}
 
 TP снижает пиковую память за счёт A-матриц ($\sim\!2\times$),
