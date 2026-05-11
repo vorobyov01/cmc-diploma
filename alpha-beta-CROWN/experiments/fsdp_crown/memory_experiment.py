@@ -17,11 +17,29 @@ from auto_LiRPA.perturbations import PerturbationLpNorm
 from auto_LiRPA.fsdp_utils import fsdp_shard_bounded_module, fsdp_free_gathered_weights
 
 
-def measure_bounds(model, x, eps, dev, use_fsdp=False, ws=1, rank=0, method="CROWN"):
-    """Run compute_bounds and return (lb, ub, peak_memory_MB).
+def _param_bytes_mb(lirpa):
+    """Count bytes stored in BoundParams (weight shards or full weights).
 
-    Peak memory is measured only during compute_bounds (not model init),
-    giving a fair comparison between single-GPU and FSDP.
+    This is the correct baseline metric for FSDP: it measures exactly what
+    FSDP shards (the weight matrices), ignoring BoundedModule metadata,
+    JIT-trace artifacts, and the caller's model copy that stay on GPU
+    regardless of sharding.  Expected: single-GPU = W bytes, FSDP=P ~ W/P bytes.
+    """
+    from auto_LiRPA.operators.leaf import BoundParams
+    total = 0
+    for node in lirpa.nodes():
+        if isinstance(node, BoundParams):
+            total += node.param.data.numel() * node.param.data.element_size()
+    return total / (1024 ** 2)
+
+
+def measure_bounds(model, x, eps, dev, use_fsdp=False, ws=1, rank=0, method="CROWN"):
+    """Run compute_bounds and return (lb, ub, peak_memory_MB, param_memory_MB).
+
+    Baseline (param_memory_MB) is counted directly from BoundParams bytes so
+    that the comparison is not polluted by BoundedModule metadata or the
+    caller's model copy that is present on GPU for both modes.
+    Peak memory is measured only during compute_bounds.
     """
     gc.collect()
     torch.cuda.empty_cache()
@@ -38,18 +56,16 @@ def measure_bounds(model, x, eps, dev, use_fsdp=False, ws=1, rank=0, method="CRO
     ptb = PerturbationLpNorm(norm=float("inf"), x_L=x_L.clone(), x_U=x_U.clone())
     bx = BoundedTensor(x.clone(), ptb)
 
-    # Measure ONLY the compute_bounds phase for fair comparison.
-    # At this point: single-GPU has full weights in params;
-    # FSDP has sharded weights (forward_values freed after shape refresh).
+    # Baseline: bytes actually stored in BoundParams (full weights vs shards).
+    mem_before = _param_bytes_mb(lirpa)
+
     gc.collect()
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats(dev)
-    mem_before = torch.cuda.memory_allocated(dev) / (1024 ** 2)
 
     lb, ub = lirpa.compute_bounds(x=(bx,), method=method)
 
     peak_mb = torch.cuda.max_memory_allocated(dev) / (1024 ** 2)
-    mem_after = torch.cuda.memory_allocated(dev) / (1024 ** 2)
 
     if use_fsdp:
         fsdp_free_gathered_weights(lirpa)
@@ -98,7 +114,7 @@ def run_experiment(model, x, eps, dev, rank, ws, label, method="CROWN"):
         print(f"[{status}] {label} ({method})")
         print(f"  Bounds: |lb_diff|={lb_diff:.2e}, |ub_diff|={ub_diff:.2e}, "
               f"cross-rank={rank_diff:.2e}")
-        print(f"  Baseline memory (before compute_bounds): "
+        print(f"  Baseline memory (BoundParams bytes):      "
               f"single={base_single:.1f} MB, FSDP={max_base_fsdp:.1f} MB, "
               f"savings={base_savings:.1f}%")
         print(f"  Peak memory (during compute_bounds):     "
