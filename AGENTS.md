@@ -16,9 +16,41 @@
 
 ## GPU-виртуалка
 
-Подключение:
+Подключение (предпочтительный способ — прямой TCP, без PTY-ограничений RunPod-шлюза):
 ```bash
-ssh 1u5y6uqld2ntt0-64411be8@ssh.runpod.io -i /Users/svorobyov/Documents/cmc_mmp/vastai
+# Прямой TCP (работает без PTY, рекомендуется для скриптов)
+ssh root@69.30.85.109 -p 22190 -i /Users/svorobyov/Documents/cmc_mmp/vastai
+
+# Через RunPod-шлюз (требует PTY, для интерактивной работы)
+ssh o36avm4xsql0q2-64411854@ssh.runpod.io -i /Users/svorobyov/Documents/cmc_mmp/vastai
+```
+
+### Настройка окружения на свежей VM
+
+```bash
+git clone https://github.com/vorobyov01/cmc-diploma.git
+cd cmc-diploma
+
+# ВАЖНО: всегда использовать uv sync, а не pip install вручную.
+# lock-файл (uv.lock) пинит torch==2.8.x+cu128 — единственную версию,
+# совместимую с драйвером CUDA 12.8 на этих GPU (NVIDIA A40).
+# pip install/uv pip install без lock-а может поднять torch до cu130+,
+# который несовместим с текущим драйвером и ломает cuda.is_available().
+uv sync
+
+source .venv/bin/activate
+
+# Дополнительные зависимости для complete_verifier (не в uv.lock):
+pip install git+https://github.com/Verified-Intelligence/onnx2pytorch@fe7281b9b6c8c28f61e72b8f3b0e3181067c7399
+uv pip install onnx onnxruntime onnxoptimizer skl2onnx psutil appdirs packaging sortedcontainers timm pandas scipy -q
+# Заглушка для Gurobi (не нужен в BaB без LP-ветки):
+python -c "
+import site, os, pathlib
+stub = pathlib.Path(site.getsitepackages()[0]) / 'gurobipy' / '__init__.py'
+stub.parent.mkdir(exist_ok=True)
+stub.write_text('class GurobiError(Exception): pass\nclass Model:\n    def __init__(self,*a,**kw): raise GurobiError(\"no gurobi\")\nclass GRB:\n    INFINITY=1e100; MINIMIZE=1; MAXIMIZE=-1; CONTINUOUS=\"C\"; BINARY=\"B\"; INTEGER=\"I\"; OPTIMAL=2\n')
+print('gurobipy stub written')
+"
 ```
 
 ## Полезные команды
@@ -26,8 +58,8 @@ ssh 1u5y6uqld2ntt0-64411be8@ssh.runpod.io -i /Users/svorobyov/Documents/cmc_mmp/
 ### Тесты на VM
 
 ```bash
-# Подключение
-ssh 1u5y6uqld2ntt0-64411be8@ssh.runpod.io -i /Users/svorobyov/Documents/cmc_mmp/vastai
+# Подключение (прямой TCP)
+ssh root@69.30.85.109 -p 22190 -i /Users/svorobyov/Documents/cmc_mmp/vastai
 
 # Pull и активация окружения
 cd /root/cmc-diploma && git pull && source .venv/bin/activate && cd alpha-beta-CROWN/auto_LiRPA
