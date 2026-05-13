@@ -1,0 +1,92 @@
+%!TEX root = ../graduate-work.tex
+\section{Conclusion}
+
+\subsection{Summary of Results}
+
+This thesis addresses the adaptation of parallelism techniques from large
+language model training to the problem of formal neural network verification.
+Two approaches were implemented and experimentally validated: Tensor Parallelism
+(TP) and Fully Sharded Data Parallelism (FSDP), with FSDP extended to complete
+verification via $\beta$-CROWN and Branch-and-Bound.
+
+The following results were obtained:
+
+\begin{enumerate}
+    \item \textbf{Near-linear memory reduction with TP.}
+    TP reduces peak GPU memory consumption proportionally to the number of GPUs
+    (factor $\approx\!1.985$ at $P = 2$) by sharding both weight matrices and
+    CROWN $A$-matrices. Specialised operators
+    \texttt{BoundLinearTP\_Col}/\texttt{Row} with correct \texttt{AllReduce}
+    and computational-graph partitioning were implemented.
+    Bounds satisfy soundness for all tested models, but multi-zone models
+    exhibit degrading bound tightness due to forced IBP substitution for
+    intermediate bounds.
+
+    \item \textbf{Bitwise-accurate bounds with FSDP.}
+    FSDP shards weight matrices, assembling them layer-wise via
+    \texttt{AllGather}. All tested configurations (MLPs of various widths and
+    depths, ONNX models from VNN-COMP) produced bounds \textit{bitwise identical}
+    to the single-GPU baseline ($\Delta lb = \Delta ub = 0.00$). Baseline
+    memory (weight storage) is reduced by exactly 50\% (factor $1/P$ at $P{=}2$,
+    since each rank stores exactly half of every weight tensor); peak memory
+    during \texttt{compute\_bounds} by 17--39\% depending on the ratio of
+    weights to $A$-matrices.
+
+    \item \textbf{Automatic sharding.}
+    Automatic sharding functions (\texttt{tp\_shard\_bounded\_module},
+    \texttt{fsdp\_shard\_bounded\_module}) were implemented for both approaches;
+    they transform any \texttt{BoundedModule} (including ONNX-loaded models)
+    without manual network rewriting.
+
+    \item \textbf{FSDP in complete verification ($\beta$-CROWN+BaB).}
+    A fair comparison (identical batch size, round count, and the
+    \texttt{force\_synchronous} flag) showed that FSDP adds
+    $\leq\!5$~MB AllGather overhead and does not alter the complete-verification
+    workload. On small models (${\sim}1.5$~MB weights) no memory savings are
+    observed---the bottleneck is alpha tensors ($\gg\!1$~GB), not weights.
+    FSDP preserves bound accuracy and scales to arbitrary BaB problems.
+
+    \item \textbf{FSDP for convolutional layers (\texttt{BoundConv}).}
+    Sharding was adapted to \texttt{BoundConv} (along the out\_channels axis).
+    Validation on CIFAR-100 ResNet medium/large (VNN-COMP'24) yielded bitwise
+    identical bounds. On ResNet-large (${\sim}95$~MB weights, $>\!4$~GB
+    alpha tensors) the memory savings from weight sharding are outweighed by
+    AllGather buffer overhead, confirming that alpha tensors dominate memory.
+
+    \item \textbf{JIT compatibility and ViT verification.}
+    Transformer verification required resolving JIT-compilation incompatibilities
+    in \texttt{BoundReshape}, \texttt{BoundConcat}, and
+    \texttt{BoundConstantOfShape}. After the fixes, the model \texttt{pgd\_2\_3\_16}
+    from VNN-COMP'23 runs correctly in $\alpha,\beta$-CROWN with FSDP, producing
+    bounds identical to the reference.
+\end{enumerate}
+
+In summary, TP and FSDP represent opposite ends of the \textit{memory--accuracy}
+trade-off: TP achieves the highest memory savings (${\sim}2\times$) but loses
+bound tightness as model depth grows; FSDP provides moderate peak memory savings
+(17--39\% for incomplete verification) while preserving bitwise accuracy and
+remaining compatible with $\beta$-CROWN+BaB.
+
+\subsection{Future Work}
+
+\textbf{Sharding alpha tensors.}
+Experiments~6--8 show that in $\alpha$-CROWN+BaB mode the memory bottleneck is
+per-neuron alpha tensors, not weight matrices. Distributing alpha tensors across
+GPUs (analogous to Domain Parallelism) would eliminate this barrier and provide
+meaningful memory savings during complete verification of large convolutional
+networks.
+
+\textbf{Alpha-CROWN optimisation with TP and FSDP.}
+Gradient-based optimisation of alpha slopes is compatible with both approaches
+since it uses the same backward pass as CROWN.
+
+\textbf{Scaling to more GPUs.}
+All experiments were conducted at $P = 2$. Validation at $P = 4, 8$ would
+empirically characterise communication overhead and identify scalability limits.
+FSDP at $P = 4$ theoretically achieves ${\sim}93\%$ baseline memory savings.
+
+\textbf{Domain-Parallel BaB with input-split branching.}
+The current FSDP--BaB integration operates in synchronous mode (all GPUs
+process one sub-tree). Input-split branching---parallel exploration of different
+sub-domains across GPUs---would enable not only memory savings but also genuine
+verification speedup.

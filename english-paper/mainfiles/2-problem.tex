@@ -1,0 +1,42 @@
+%!TEX root = ../graduate-work.tex
+\section{Problem Statement}
+
+The primary limitation of contemporary verifiers is GPU memory consumption:
+bound-propagation algorithms (IBP, CROWN, $\alpha$-CROWN) require weight
+matrices and linear-relaxation coefficient matrices to be stored in their
+entirety on a single accelerator, rendering verification of large models
+infeasible.
+
+\textbf{Goal of this work} is to adapt parallelism techniques developed for
+training large language models to the problem of formal neural network
+verification, and to experimentally characterise the trade-offs between
+memory savings, bound tightness, and compatibility with complete verification.
+
+\textbf{Objectives:}
+\begin{enumerate}
+    \item Analyse the applicability of LLM training parallelism strategies---
+    Tensor Parallelism, Pipeline Parallelism, and FSDP---to bound-propagation
+    algorithms and identify which are worth adapting.
+
+    \item Implement \textbf{Tensor Parallelism} in a fork of
+    \texttt{auto\_LiRPA}: sharding of weight matrices and linear-relaxation
+    $A$-matrices across multiple GPUs, integration with ONNX models, soundness
+    verification, and peak memory measurement.
+
+    \item Implement \textbf{FSDP} for bound propagation---layer-wise
+    AllGather/free of weights without modifying the computational
+    logic---and achieve bitwise identity of bounds with the single-GPU baseline.
+
+    \item Integrate \textbf{FSDP with complete verification}
+    ($\beta$-CROWN + Branch-and-Bound); conduct a fair comparison by
+    eliminating the auto-batch-enlargement artefact so that both modes
+    process an identical workload.
+
+    \item Extend FSDP sharding to \textbf{convolutional layers}
+    (\texttt{BoundConv}) and verify correctness on ResNet models from
+    the VNN-COMP benchmark.
+
+    \item Run experiments on VNN-COMP benchmarks (MNIST-FC, ViT,
+    CIFAR-100 ResNet) and determine under what conditions each method
+    yields meaningful memory savings.
+\end{enumerate}

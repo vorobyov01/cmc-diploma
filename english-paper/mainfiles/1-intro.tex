@@ -1,0 +1,85 @@
+%!TEX root = ../graduate-work.tex
+\phantomsection
+\section*{Introduction}
+\addcontentsline{toc}{section}{Introduction}
+
+Neural networks are increasingly deployed in safety-critical contexts where
+errors are intolerable: autonomous vehicle control systems, avionics software,
+and medical diagnostic algorithms. Standard testing methods are fundamentally
+insufficient in such settings: a test verifies a specific input vector, not
+the entire set of admissible inputs. Formal verification addresses exactly this
+gap---it provides a mathematical proof that the network behaves correctly for
+\emph{every} input in a specified region, not merely for tested
+examples~\cite{Guidotti2019Enhancing}.
+
+The practical reach of verification was long limited to small networks.
+Contemporary verifiers, foremost $\alpha,\beta$-CROWN---winner of the
+VNN-COMP competition for several consecutive years---run on GPUs and employ
+bound-propagation algorithms: IBP, CROWN, and $\alpha$-CROWN. The
+bottleneck of these algorithms is memory: weight matrices and linear-relaxation
+coefficient matrices must fit entirely on a single accelerator. This thesis is
+devoted to removing that constraint through parallelism techniques developed for
+training large language models.
+
+\subsection*{Formal Problem Statement}
+
+Let a neural network define a function $f: \mathbb{R}^n \to \mathbb{R}^m$.
+The verification problem is to decide whether, for all inputs in the admissible
+set $\mathcal{X} \subseteq \mathbb{R}^n$, some output property $\psi$ holds:
+$$\forall \mathbf{x} \in \mathcal{X},\quad \psi(f(\mathbf{x}))$$
+
+In practice, verifiers solve the \emph{dual} problem: they search for a
+counterexample---an input $\mathbf{x} \in \mathcal{X}$ that violates $\psi$.
+This is a satisfiability query:
+$$\exists \mathbf{x} \in \mathcal{X} : \neg\psi(f(\mathbf{x}))$$
+
+If the query is unsatisfiable (UNSAT), the property is proved for the entire
+domain; if satisfiable (SAT), a counterexample is returned~\cite{marzari2025advancingneuralnetworkverification}.
+
+\textbf{Local robustness.}
+The most widely studied verification property is resistance of a classifier
+to small input perturbations. For a sample $\mathbf{x}_0$ of correct class $c$
+under $L_p$ norm, the property states that for all $\mathbf{x}$ with
+$\|\mathbf{x} - \mathbf{x}_0\|_p \le \epsilon$ it holds that
+$f(\mathbf{x})_c > f(\mathbf{x})_j$ for all $j \neq c$~\cite{DBLP:journals/corr/abs-2002-03339}.
+Beyond this, control applications use functional specifications over physical
+variables---a canonical example is the ACAS~Xu system~\cite{Demarchi2023SupportingStandardization}.
+
+\subsection*{The VNN-LIB Standard}
+
+Prior to 2020, each verifier used its own format for network and property
+descriptions, making direct comparison between tools infeasible. The VNN-LIB
+(Verification of Neural Networks Library) standard, developed by the
+community, unified the specification language on the basis of SMT-LIB:
+input and output variables, linear constraints over them, and UNSAT/SAT
+semantics~\cite{VNNLIBWebsite}. Together with the ONNX format for weight
+storage, VNN-LIB forms the infrastructure for VNN-COMP competitions, where
+benchmarks and tools are developed independently~\cite{arXiv2212VNNCOMP2022}.
+
+An illustrative specification---checking that the output does not exceed a threshold:
+\begin{lstlisting}[caption={Example VNN-LIB specification},label={lst:smtlib}]
+(declare-const X Real)
+(declare-const Y_out Real)
+(assert (>= X 0.0))
+(assert (<= X 1.0))
+(assert (= Y_out (network_output X)))
+(assert (> Y_out 5.0))   ; property violation
+\end{lstlisting}
+
+\subsection*{Computational Complexity}
+
+The verification problem is NP-complete even for single-hidden-layer ReLU
+networks: 3-SAT reduces polynomially to it, as a ReLU neuron can emulate
+a logical gate~\cite{arXiv2403RobustnessVerification}.
+For networks with smooth activations (Sigmoid, Tanh, GELU) the complexity is
+higher---$\exists\mathbb{R}$-complete, meaning the problem reduces to finding
+solutions of systems of polynomial inequalities over the reals~\cite{NeurIPS2021ExistsRComplete}.
+For certain classes of recurrent networks, the reachability problem is
+algorithmically undecidable in general~\cite{IJCAI2018ReachabilityDNN}.
+
+In practice this means that a \emph{complete} verifier must resort to
+worst-case exponential enumeration (Branch-and-Bound), while an
+\emph{incomplete} verifier replaces it with a polynomial relaxation at the
+cost of losing completeness guarantees. This trade-off---completeness versus
+scalability---defines the architecture of modern verifiers and is the starting
+point of the present work.

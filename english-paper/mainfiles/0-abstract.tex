@@ -1,0 +1,34 @@
+%!TEX root = ../graduate-work.tex
+\phantomsection
+\section*{Abstract}
+\addcontentsline{toc}{section}{Abstract}
+
+Formal verification of neural networks---the mathematical proof that a network
+satisfies given safety properties for all inputs within a specified domain---faces
+a fundamental scalability bottleneck: bound-propagation algorithms (IBP, CROWN,
+$\alpha$-CROWN) require weight matrices to be stored in their entirety on a single
+GPU, which precludes verification of models with billions of parameters.
+
+This thesis investigates the application of parallelism techniques developed for
+training large language models to the problem of formal neural network verification.
+Two approaches are implemented and experimentally evaluated within the
+\texttt{auto\_LiRPA} / $\alpha,\beta$-CROWN framework:
+
+\textbf{Tensor Parallelism (TP)}---sharding of weight matrices and linear-relaxation
+coefficient matrices ($A$-matrices) across multiple GPUs. A peak-memory reduction of
+$\approx\!2\times$ is achieved at $P=2$ GPUs; soundness of the computed bounds is
+confirmed on VNN-COMP 2022 benchmarks (MNIST-FC).
+
+\textbf{Fully Sharded Data Parallelism (FSDP)}---layer-wise sharding of weight
+matrices only, with an \texttt{AllGather} collective before each layer.
+The resulting bounds are bitwise identical to the single-GPU baseline: baseline
+memory (weight storage) is reduced by exactly 50\% (factor $1/P$ at $P{=}2$),
+and peak memory during \texttt{compute\_bounds} by 17--39\% on MLPs. FSDP is integrated with
+complete verification ($\beta$-CROWN + Branch-and-Bound) and extended to
+convolutional layers (\texttt{BoundConv}); correctness is verified on
+CIFAR-100 ResNet medium/large (VNN-COMP 2024), with ResNet-large yielding a
+complete verification result (unsat).
+
+Experiments establish that in $\alpha$-CROWN+BaB mode the memory bottleneck
+is the per-neuron alpha tensors rather than weight matrices. The applicability
+boundaries of each approach are characterised and directions for future work are formulated.

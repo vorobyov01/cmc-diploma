@@ -1,0 +1,107 @@
+%!TEX root = ../graduate-work.tex
+\section{Parallelism Strategies for Neural Network Training}
+
+The parallelism methods examined in this work were developed for training large
+language models (LLMs) that do not fit in the memory of a single GPU. Three
+principal strategies are described below---Tensor Parallelism, Pipeline
+Parallelism, and Fully Sharded Data Parallelism---along with the rationale for
+considering them as candidates for adaptation to the verification problem.
+
+\subsection{Scale of Modern Models and the Transformer Architecture}
+
+The backbone of modern LLMs is the Transformer architecture~\cite{Vaswani2017Attention},
+built around the self-attention mechanism. Each layer consists of a
+Multi-Head Attention block and a Feed-Forward Network.
+
+In the \textbf{Multi-Head Attention} block, query, key, and value matrices are
+computed as $Q = XW_Q$, $K = XW_K$, $V = XW_V$, where
+$W_Q, W_K, W_V \in \mathbb{R}^{d \times d}$, and the attention output is:
+$$\mathrm{Attention}(Q, K, V) = \mathrm{softmax}\!\left(\frac{QK^\top}{\sqrt{d}}\right)V.$$
+
+The \textbf{Feed-Forward Network} is a two-layer fully connected network with
+an expansion factor:
+$$\mathrm{FFN}(x) = W_2 \cdot \mathrm{GELU}(W_1 x + b_1) + b_2,$$
+where $W_1 \in \mathbb{R}^{4d \times d}$ and $W_2 \in \mathbb{R}^{d \times 4d}$.
+
+Each block contains several matrix multiplications with weight matrices of
+size $d \times d$ or $d \times 4d$. At $d = 12288$ (GPT-3, 175 billion
+parameters~\cite{GPT3Brown2020}), a single matrix $W_1$ occupies
+$12288 \times 49152 \times 4 \approx 2.3$~GB in float32. A model with
+96 such layers does not fit on any existing accelerator---hence the need
+for parallelism strategies.
+
+\subsection{Tensor Parallelism (TP)}
+
+Tensor Parallelism, introduced in Megatron-LM~\cite{MegatronLM2020},
+partitions matrix multiplications \textit{within a layer} across multiple GPUs.
+The weight matrix is split so that each GPU performs its portion of the
+multiplication, and results are synchronised via collective operations.
+
+\subsubsection{Column Parallel Linear}
+
+The weight matrix $W \in \mathbb{R}^{k \times n}$ is partitioned along the
+column (output) dimension into $P$ shards:
+$$W = [W^{(0)} \mid W^{(1)} \mid \ldots \mid W^{(P-1)}], \quad
+  W^{(r)} \in \mathbb{R}^{k \times (n/P)}.$$
+GPU $r$ stores only its shard $W^{(r)}$ and computes
+$\mathbf{y}^{(r)} = W^{(r)\top} \mathbf{x}$, where the input vector
+$\mathbf{x}$ is replicated on all GPUs. After the multiplication, the output
+is partitioned along the output dimension.
+
+\subsubsection{Row Parallel Linear}
+
+The weight matrix $W \in \mathbb{R}^{n \times m}$ is partitioned along rows:
+$$W = \begin{bmatrix} W^{(0)} \\ W^{(1)} \\ \vdots \\ W^{(P-1)} \end{bmatrix},
+  \quad W^{(r)} \in \mathbb{R}^{(n/P) \times m}.$$
+GPU $r$ multiplies its portion of the split input $\mathbf{x}^{(r)}$
+by its shard: $\mathbf{z}^{(r)} = W^{(r)} \mathbf{x}^{(r)}$.
+The full output is reconstructed via \texttt{AllReduce}:
+$$\mathbf{y} = \sum_{r=0}^{P-1} \mathbf{z}^{(r)}.$$
+
+\subsubsection{Collective Operations}
+
+A Column--Row Parallel pair forms the basic TP building block.
+The forward pass requires only one \texttt{AllReduce} after the Row Parallel
+layer; the backward pass requires one \texttt{AllReduce} for gradients before
+the Column Parallel layer. On fast inter-GPU interconnects (NVLink, NVSwitch),
+synchronisation takes a negligible fraction of compute
+time~\cite{MegatronLM2020}. Without direct GPU-to-GPU connections (e.g.\ over
+PCIe), \texttt{AllReduce} becomes the bottleneck and the gains from partitioning
+disappear---hence the practical limit: TP is sensibly applied within a single
+node, typically up to 8~GPUs.
+
+\subsection{Pipeline Parallelism (PP)}
+
+Pipeline Parallelism~\cite{GPipePaper} partitions the model differently---not
+within layers but between them. Each GPU receives a \textit{stage}: several
+consecutive layers. Data flows through stages as in a pipeline, which creates
+the \textit{pipeline bubble} problem: while a GPU processes a new batch, the
+previous one is already idle; the same occurs during the backward pass.
+
+The standard remedy is to split the input batch into $M$ micro-batches and
+process them without waiting. The bubble fraction is then:
+$$r_{\text{bubble}} = \frac{P - 1}{M + P - 1},$$
+which approaches zero as $M \gg P$, though at the cost of storing intermediate
+activations for all $M$ micro-batches simultaneously. Only activations are
+transmitted between stages (point-to-point send/recv), making PP more tolerant
+of slow inter-GPU links than TP.
+
+\subsection{Fully Sharded Data Parallelism (FSDP)}
+
+Classic data parallelism replicates the entire model on each GPU, partitioning
+only data and averaging gradients via \texttt{AllReduce} after each step.
+The drawback is that each GPU holds a full copy of the model, gradients, and
+optimiser states, consuming large amounts of redundant memory.
+
+Fully Sharded Data Parallelism (FSDP), based on the ZeRO~\cite{ZeROPaper}
+framework, shards all three components: each GPU stores only $1/P$ of each
+tensor. Before computing a particular layer, an \texttt{AllGather} assembles
+the full weights; after the backward pass, FSDP aggregates gradients via
+\texttt{ReduceScatter} and applies them independently on each GPU to its shards.
+The method is especially effective for training, where optimiser states
+(Adam stores first and second moments) consume triple the memory of the weights.
+
+FSDP became the primary adaptation algorithm in this work: during verification
+there are no optimiser states, so \texttt{AllGather}/free of shards can be
+embedded in the bound-propagation procedure without altering the backward-pass
+logic---details in Chapter~\ref{sec:parallel-verifiers}.

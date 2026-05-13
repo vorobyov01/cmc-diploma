@@ -1,0 +1,274 @@
+%!TEX root = ../graduate-work.tex
+\section{Applying Parallelism to Neural Network Verification}
+\label{sec:parallel-verifiers}
+
+This chapter justifies why Tensor Parallelism and FSDP are suited to bound
+propagation, analyses their accuracy--memory trade-offs, and discusses
+integration with complete verification.
+
+\subsection{Why Tensor Parallelism Is Applicable to Verification}
+
+Bound-propagation algorithms (CROWN, $\alpha$-CROWN) reduce bound computation
+to a chain of matrix multiplications executed as a backward pass over the
+network's computational graph. For a linear layer with weight matrix $W$, the
+CROWN backward performs $A \leftarrow A \cdot W$, where $A$ is the matrix of
+linear-relaxation coefficients. This operation is identical to the backward
+pass during training, so TP transfers almost without modification.
+
+For fully connected networks, weight matrices dominate GPU memory; TP shards
+exactly these, achieving close-to-linear reduction. The communication pattern
+also matches: one \texttt{AllReduce} per Column--Row pair, with all intermediate
+computations remaining local. Crucially, TP does not alter the topology of the
+computational graph: PP, by contrast, partitions the model into stages, and
+CROWN-backward then cannot traverse all layers in a single pass---inadmissible
+for verification. \texttt{auto\_LiRPA} builds the bound-propagation graph on
+top of the original network, and a single connected graph is a necessary
+condition.
+
+\subsection{Impact of Tensor Parallelism on Bound Tightness}
+\label{sec:tp-precision-loss}
+
+The key drawback of TP is loss of bound tightness, which grows with the number
+of sharded zones. This loss is not an implementation artifact: it is
+fundamentally caused by the interaction of bound propagation with partial weight
+matrices.
+
+\subsubsection{Backward Pass in CROWN}
+
+CROWN computes linear bounds on the network output as a function of the input.
+For a network with $d$ layers and weight matrices $W_1, \ldots, W_d$, the
+backward pass constructs the $A$-matrix---the product of linearised weights:
+$$A = \Lambda_d W_d \cdot \Lambda_{d-1} W_{d-1} \cdots \Lambda_1 W_1,$$
+where $\Lambda_i = \mathrm{diag}(\lambda_i)$ is the diagonal matrix of
+ReLU linear-relaxation slopes (values in $[0, 1]$, determined from intermediate
+neuron bounds).
+
+The resulting bounds take the form:
+$$\ell \leq A \cdot \mathbf{x} + \mathbf{b} \leq u,$$
+where $\mathbf{x}$ is the input vector within an $\varepsilon$-ball.
+The key property: $A$ is a single linear function of the \textit{original}
+input, preserving dependencies between variables across all layers.
+
+\subsubsection{The Challenge of CROWN under TP}
+
+Under TP, each Column--Row pair forms a \textit{sharded zone}---a computational
+subgraph in which activations have dimension $h/P$ per GPU instead of~$h$.
+
+Let layer $W_i \in \mathbb{R}^{h \times h}$ be column-sharded: GPU~$r$ stores
+$W_i^{(r)} \in \mathbb{R}^{(h/P) \times h}$. During CROWN backward, the
+$A$-matrix from the preceding layer has full dimension~$h$:
+$$A \leftarrow A \cdot \Lambda_i W_i.$$
+Each GPU needs the \textit{full} matrix $W_i$ for this multiplication, yet
+each holds only $W_i^{(r)}$---$h/P$ rows---making a correct multiplication
+without communication impossible.
+
+For a Column--Row pair with no intermediate layers, the problem is resolved by
+a simple \texttt{AllReduce}, which recovers the full result. However, when ReLU
+activations lie between the Column and Row layers (as in typical networks with
+more than two layers), the situation becomes more complex: to select
+relaxation slopes $\lambda_i$, CROWN requires \textit{intermediate bounds}
+of neurons in the sharded zone, and computing them exactly would require a
+separate backward pass with communication at each step---negating the memory
+savings and rendering TP impractical for deep networks. The only practical
+alternative is to use IBP for intermediate bounds within zones, since IBP
+operates layer-wise with local weights and requires no $A$-matrices.
+
+\subsubsection{Why IBP Is Substantially Less Tight}
+
+The difference between IBP and CROWN lies in how each method handles
+dependencies between variables.
+
+\textbf{CROWN} maintains a global linear dependency
+$y = A \mathbf{x} + \mathbf{b}$, where $A$ encodes the influence of each input
+component through \textit{all} intermediate layers. Bounds are computed once:
+$$lb = \sum_j \min(A_j x_j^L, A_j x_j^U) + b, \quad
+  ub = \sum_j \max(A_j x_j^L, A_j x_j^U) + b.$$
+
+\textbf{IBP} computes bounds layer by layer. For the $i$-th layer with weights
+$W_i$ and input interval $[\ell_{i-1}, u_{i-1}]$:
+\begin{align*}
+\ell_i &= W_i^+ \ell_{i-1} + W_i^- u_{i-1} + b_i, \\
+u_i &= W_i^+ u_{i-1} + W_i^- \ell_{i-1} + b_i,
+\end{align*}
+where $W_i^+ = \max(W_i, 0)$, $W_i^- = \min(W_i, 0)$.
+
+The weakness of IBP is componentwise interval treatment: variable dependencies
+are not tracked. This gives rise to the \textit{wrapping effect}~\cite{moore2009interval}---an
+artifact of interval arithmetic in which bound widths can grow exponentially
+with network depth.
+
+\textbf{Example.} Consider a two-dimensional input
+$\mathbf{x} = (x_1, x_2)^T$ with $x_1, x_2 \in [-1, 1]$ and
+$W = \begin{pmatrix} 1 & 1 \\ 1 & -1 \end{pmatrix}$.
+
+CROWN: $y = W\mathbf{x}$, so $y_1 = x_1 + x_2 \in [-2, 2]$,
+$y_2 = x_1 - x_2 \in [-2, 2]$. Applying $W$ again:
+$z_1 = y_1 + y_2 = 2x_1 \in [-2, 2]$.
+
+IBP: the first layer gives $y_1 \in [-2, 2]$, $y_2 \in [-2, 2]$---matching
+CROWN. But when applying $W$ again, IBP treats $y_1$ and $y_2$ as
+\textit{independent}: $z_1 = y_1 + y_2 \in [-4, 4]$---twice as wide as the
+true bound. CROWN, by tracking the dependencies $y_1 = x_1 + x_2$,
+$y_2 = x_1 - x_2$, yields the exact result.
+
+\subsubsection{Accumulation of Error with Depth}
+
+For a random weight matrix with entries of order $O(1/\sqrt{h})$ (typical
+initialisation), the IBP interval width after $k$ layers grows as $O(\rho^k)$,
+where $\rho$ is the spectral radius of the generalised absolute-value matrix $|W|$.
+
+The experimental data (Table~\ref{tab:tp-correctness}) confirm this dependence.
+With one Column--Row pair (model 256$\times$2), the sharded zone contains no
+intermediate ReLU; IBP fallback is not used, and the deviation is
+$\sim\!10^{-8}$ (float32 machine precision). With two pairs (256$\times$4),
+each zone contains an intermediate ReLU, IBP is used, and the deviation is
+$\sim\!2.5$---an increase of eight orders of magnitude. With three pairs
+(256$\times$6), three zones each containing a ReLU yield a deviation of
+$\sim\!750$.
+
+The root cause is a \textit{method substitution}, not a distributed-computation
+error: IBP must be used instead of CROWN inside sharded zones, and with each
+additional zone the error compounds over depth.
+
+TP-based verification is effective for shallow models (1--2 sharded zones).
+For deep models ($\geq\!4$ zones), the loss of bound tightness renders
+bounds practically useless---motivating the FSDP approach
+(Section~\ref{sec:fsdp-memory-theory}), which has no such limitation.
+
+\subsection{Comparison of TP and FSDP for Verification}
+
+Pipeline Parallelism is inapplicable to verification: CROWN performs a backward
+pass over \textit{all} layers, and with PP, where each GPU stores only its
+stage, a complete backward pass would require shipping weights between GPUs---
+effectively turning PP into a less efficient variant of TP with point-to-point
+communication.
+
+FSDP shards weights across GPUs, assembling them via \texttt{AllGather}
+immediately before each layer. In the verification context this is a fundamental
+advantage over TP: each layer receives the full weight matrix, so computations
+are mathematically \textit{equivalent} to the single-GPU case without any loss
+of bound tightness. The cost is higher communication overhead:
+\texttt{AllGather} before every layer instead of one \texttt{AllReduce} per
+layer pair in TP.
+
+TP shards both weights and $A$-matrices, achieving up to ${\sim}2\times$ peak
+memory reduction but with degrading bound tightness as the number of sharded
+zones grows. FSDP shards \textit{only weights}, achieving exactly 50\% baseline
+memory savings (factor $1/P$) and 17--39\% peak memory savings, with bounds
+bitwise identical to the single-GPU baseline---critical for complete verification
+($\beta$-CROWN and Branch-and-Bound).
+
+\subsection{TP Implementation for Bound Propagation in \texttt{auto\_LiRPA}}
+
+Integration of TP into \texttt{auto\_LiRPA}~\cite{AutoLiRPARepo} required four
+components.
+
+Operators \texttt{BoundLinearTP\_Col} and \texttt{BoundLinearTP\_Row} inherit
+from \texttt{BoundLinear}, store sharded weight matrices, and add
+\texttt{AllReduce} to \texttt{bound\_backward}, ensuring correct bound
+propagation through distributed layers.
+
+Each operator is registered as a custom ONNX operation via
+\texttt{torch.autograd.Function} and the \texttt{symbolic} method, allowing
+the PyTorch JIT tracer to construct the computational graph correctly.
+
+The function \texttt{tp\_shard\_bounded\_module} takes an arbitrary
+\texttt{BoundedModule} (including one loaded from ONNX) and automatically
+replaces alternating pairs of \texttt{BoundLinear} nodes with
+\texttt{BoundLinearTP\_Col/Row}, sharding the weight matrices over the
+available GPUs.
+
+Between each Column--Row pair of nodes, a \textit{sharded zone} is formed---a
+subgraph with reduced activation dimensionality. Nodes within zones (including
+ReLU) are processed locally without GPU-to-GPU synchronisation; zone membership
+of each node is determined by BFS labelling at module initialisation.
+
+\subsection{FSDP Implementation for Bound Propagation in \texttt{auto\_LiRPA}}
+
+The FSDP implementation requires no new operator types and does not modify the
+computational graph---the total code amounts to approximately 100 lines, versus
+${\sim}500$ for TP.
+
+The function \texttt{fsdp\_shard\_bounded\_module} traverses the
+\texttt{BoundedModule} graph, locates \texttt{BoundParams} nodes of fully
+connected (\texttt{BoundLinear}) and convolutional (\texttt{BoundConv}) layers,
+and replaces each matrix with a shard along dimension 0 (\texttt{dim=0}).
+For \texttt{BoundLinear}, the matrix $W \in \mathbb{R}^{k \times n}$ is
+replaced with $W^{(r)} \in \mathbb{R}^{(k/P) \times n}$; for
+\texttt{BoundConv}, the tensor
+$W \in \mathbb{R}^{C_\text{out} \times C_\text{in} \times k_H \times k_W}$
+is replaced with
+$W^{(r)} \in \mathbb{R}^{(C_\text{out}/P) \times C_\text{in} \times k_H \times k_W}$.
+Sharding along the output dimension is correct since both layer types are
+linear in the output and \texttt{AllGather} reconstructs the full matrix correctly.
+
+When the \texttt{forward()} method of \texttt{BoundParams} detects the sharding
+flag, it initiates \texttt{dist.all\_gather}, assembling the full matrix from
+shards on all GPUs. The full matrix is returned as the forward-pass result and
+used by all downstream operations without modification.
+
+Hooks \texttt{fsdp\_gather\_node} and \texttt{fsdp\_free\_node} are integrated
+into \texttt{backward\_general} (CROWN backward) and \texttt{IBP\_general}
+(IBP forward): the full matrix is assembled immediately before the layer is
+processed and freed immediately afterwards. At any given moment, at most one
+full weight matrix is present in GPU memory (in addition to the shards).
+
+\subsubsection{Theoretical Memory Analysis}
+\label{sec:fsdp-memory-theory}
+
+Let the model contain $d$ linear layers with weight matrices
+$W_i \in \mathbb{R}^{h \times h}$, verification is performed by CROWN for a
+single example, and $P$ is the number of GPUs.
+
+In single-GPU mode all weights are stored in full: $M_W = d \cdot h^2$.
+With FSDP, each GPU stores $1/P$ of each weight plus one full matrix for the
+current layer:
+$$M_W^{\text{FSDP}} = \frac{d \cdot h^2}{P} + h^2.$$
+
+In CROWN backward, the $A$-matrix for intermediate layer $i$ has size
+$O(h \times h)$. Under TP, $A$-matrices pass through sharded layers at reduced
+dimension $h/P$; under FSDP they always have full dimension~$h$:
+$$M_A^{\text{TP}} \propto \frac{h^2}{P}, \qquad
+  M_A^{\text{FSDP}} \propto h^2.$$
+
+Total peak memory for TP:
+$$M_{\text{peak}}^{\text{TP}} \approx
+    \frac{(d + C) \cdot h^2}{P},$$
+yielding a linear reduction by a factor of $P$. For FSDP:
+$$M_{\text{peak}}^{\text{FSDP}} \approx
+    h^2 \!\left(\frac{d}{P} + 1 + C\right),$$
+where $C$ is the number of simultaneously stored $A$-matrices.
+
+FSDP saves memory only on weights, whereas TP reduces both terms. The ratio
+of FSDP peak memory to single-GPU peak:
+$$\frac{M_{\text{peak}}^{\text{FSDP}}}{M_{\text{peak}}^{\text{single}}}
+    = \frac{d/P + 1 + C}{d + C}.$$
+At $d = 4$, $C \approx 4$, $P = 2$ this gives
+$\approx (2 + 1 + 4)/(4 + 4) = 7/8 = 0.875$---consistent with the
+experimentally observed savings of ${\sim}34$\%.
+
+Baseline memory (weight storage without $A$-matrices, measured before
+\texttt{compute\_bounds}) is reduced exactly by a factor of $P$:
+$$\frac{M_W^{\text{FSDP}}}{M_W^{\text{single}}} = \frac{1}{P},$$
+since each GPU stores exactly $1/P$ rows of every weight tensor.
+At $P = 2$ this gives $0.5$, matching the experimentally observed 50\%
+reduction across all tested configurations.
+
+\subsection{Challenges of Integrating TP with Complete Verification}
+
+Integrating TP with BaB is significantly more complex than FSDP. Branch-and-Bound
+selects a neuron to fix at each step; under TP, neurons in sharded layers are
+distributed across GPUs, and even selecting the neuron requires collecting
+statistics from all devices. Beyond this, $\beta$-CROWN encodes branching
+constraints via dual variables $\beta$ that are defined locally for neurons in
+sharded zones but affect global bounds through \texttt{AllReduce}---a non-trivial
+synchronisation problem. Finally, BaB generates millions of sub-problems, and
+each sub-problem in a batch must use the same TP configuration, complicating
+load balancing.
+
+FSDP is free of these difficulties: each rank receives full weight matrices via
+\texttt{AllGather} and performs branching logic identical to the single-GPU case.
+FSDP integration with $\beta$-CROWN + BaB is implemented and experimentally
+confirmed (see Section~\ref{sec:exp6}): under an identical workload, both modes---
+single-GPU and FSDP$=$2---produce bitwise-identical results, with \texttt{AllGather}
+overhead not exceeding 5~MB.

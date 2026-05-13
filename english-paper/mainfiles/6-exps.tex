@@ -1,0 +1,421 @@
+%!TEX root = ../graduate-work.tex
+\section{Experiments}
+
+\subsection{Methodology and Experimental Plan}
+
+Eight experiments were conducted to validate the implemented methods, grouped
+by technique and the property under test. Experiments~1--3 concern Tensor
+Parallelism: memory consumption when performing CROWN verification of a model
+that does not fit on a single GPU; correctness and soundness of bounds in the
+presence of multiple sharded zones; automatic sharding of ONNX models from
+VNN-COMP~2022. Experiments~4--8 concern FSDP: bitwise identity of bounds;
+savings in baseline and peak memory as a function of model width and depth;
+fair comparison of FSDP$=$2 vs.\ single-GPU in $\beta$-CROWN+BaB under an
+identical workload; verification of ViT after resolving JIT incompatibilities;
+and correctness of BoundConv sharding on convolutional models from VNN-COMP'24.
+
+Experiments~1--5 were conducted on Server~A: 2$\times$~NVIDIA~A40 (48~GB VRAM,
+Ampere), inter-GPU connection via NVLink. Experiments~6--8 were conducted on
+Server~B: 2$\times$~NVIDIA~A40 (48~GB), connection via PCIe without NVLink;
+the flag \texttt{NCCL\_P2P\_DISABLE=1} was set to prevent AllGather hangs.
+The collective-operation backend was NCCL; framework was PyTorch~2.x; all
+distributed runs were launched via \texttt{torchrun --nproc\_per\_node=2}.
+
+\subsection{Experiment 1: GPU Memory Consumption}
+
+\subsubsection{Model Architecture}
+
+The target of verification was a fully connected network with a single hidden
+layer:
+$$f(\mathbf{x}) = W_2 \cdot \mathrm{ReLU}(W_1 \mathbf{x} + \mathbf{b}_1) + \mathbf{b}_2,$$
+where $W_1 \in \mathbb{R}^{H \times D}$, $W_2 \in \mathbb{R}^{1 \times H}$,
+$D = 4096$, $H = 262144$. The matrix $W_1$ of size $262144 \times 4096$
+($\approx\!4$~GB in float32) dominates memory consumption both during the
+forward pass and during CROWN bound computation.
+
+\subsubsection{Tensor Parallelism Implementation}
+
+For the TP variant, the model was partitioned following the Megatron-LM
+scheme~\cite{MegatronLM2020}. $W_1$ is column-sharded: GPU~$r$ holds
+$W_1^{(r)} \in \mathbb{R}^{(H/P) \times D}$. $W_2$ is row-sharded: GPU~$r$
+holds $W_2^{(r)} \in \mathbb{R}^{1 \times (H/P)}$, computes a partial result,
+and \texttt{AllReduce} reconstructs the full output. For integration with
+\texttt{auto\_LiRPA}~\cite{AutoLiRPARepo}, operators \texttt{BoundLinearTP\_Col}
+and \texttt{BoundLinearTP\_Row} were implemented, adding \texttt{AllReduce} to
+the bound backward pass.
+
+\subsubsection{Methodology}
+
+Verification was performed using CROWN for $L_\infty$-robustness with
+$\varepsilon = 0.01$ on a batch of $N = 2048$ random inputs of dimension
+$D = 4096$. Peak GPU memory was measured via
+\texttt{torch.cuda.max\_memory\_allocated}.
+
+\subsubsection{Results}
+
+\begin{table}[htbp]
+\centering
+\caption{Peak GPU memory during CROWN verification
+($D{=}4096$, $H{=}262144$, $N{=}2048$, $\varepsilon{=}0.01$)}
+\label{tab:tp-memory}
+\begin{tabular}{lccc}
+\toprule
+Mode & GPU & \texttt{max\_allocated}, MB & \texttt{max\_reserved}, MB \\
+\midrule
+Single GPU & 1$\times$A40 & 26\,826 & 30\,874 \\
+TP = 2     & GPU 0        & 13\,513 & 15\,512 \\
+TP = 2     & GPU 1        & 13\,513 & 15\,512 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The memory reduction factor is:
+$$k = \frac{26\,826}{13\,513} \approx 1.985,$$
+close to the theoretical limit of $P = 2$. The minor deviation is explained
+by non-shardable structures: the input tensor $\mathbf{x} \in \mathbb{R}^{N \times D}$,
+NCCL buffers, and computational graph metadata are replicated on every GPU.
+
+\subsection{Experiment 2: Correctness and Soundness of Bounds}
+
+\subsubsection{Methodology}
+
+For each test model, bounds were computed two ways: standard single-GPU CROWN
+(full weight matrix, no \texttt{AllReduce}) and CROWN with TP=2 (sharded
+matrices with \texttt{AllReduce}). Three properties were verified: maximum
+deviation $|lb_{\text{ref}} - lb_{\text{tp}}|$ and
+$|ub_{\text{ref}} - ub_{\text{tp}}|$; soundness
+($lb_{\text{tp}} \leq lb_{\text{ref}}$ and $ub_{\text{tp}} \geq ub_{\text{ref}}$
+for all outputs); and cross-rank consistency (both GPUs produce identical bounds).
+Tests covered PyTorch MLP models of varying depth and ONNX models from
+VNN-COMP~2022 (MNIST-FC)~\cite{arXiv2212VNNCOMP2022};
+$\varepsilon = 0.02$, $L_\infty$-robustness.
+
+\subsubsection{Results}
+
+\begin{table}[htbp]
+\centering
+\caption{Correctness of TP=2 CROWN bounds relative to the single-GPU reference}
+\label{tab:tp-correctness}
+\begin{tabular}{lccccc}
+\toprule
+Model & Col-Row pairs & $|lb_{\text{diff}}|$ & $|ub_{\text{diff}}|$
+    & Cross-rank & Sound \\
+\midrule
+PyTorch 256$\times$2 & 1 & $2.98 \cdot 10^{-8}$ & $2.98 \cdot 10^{-8}$ & 0 & Yes \\
+PyTorch 256$\times$4 & 2 & $2.51 \cdot 10^{0}$  & $2.49 \cdot 10^{0}$  & 0 & Yes \\
+ONNX 256$\times$2    & 1 & $5.96 \cdot 10^{-8}$ & $5.96 \cdot 10^{-8}$ & 0 & Yes \\
+ONNX 256$\times$4    & 2 & $5.64 \cdot 10^{0}$  & $3.98 \cdot 10^{0}$  & 0 & Yes \\
+ONNX 256$\times$6    & 3 & $7.92 \cdot 10^{2}$  & $7.50 \cdot 10^{2}$  & 0 & Yes \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Analysis}
+
+Models with one Column--Row pair (256$\times$2) yield bounds that agree with
+the reference up to machine epsilon ($\sim\!10^{-8}$), confirming arithmetic
+correctness: \texttt{AllReduce} in CROWN backward exactly reproduces the result
+of a full matrix multiplication.
+
+With multiple sharded zones, bounds become wider than the reference (soundness
+is preserved but tightness degrades). The loss grows with the number of zones
+and is caused not by arithmetic errors but by the method substitution:
+intermediate bounds within zones are computed via IBP, since the CROWN backward
+cannot cross zone boundaries with partial weight matrices.
+
+Cross-rank deviation is zero in all tests, confirming deterministic computation.
+
+\subsection{Experiment 3: Automatic Sharding of VNN-COMP Models}
+
+This experiment tested \texttt{tp\_shard\_bounded\_module} on models from
+VNN-COMP~2022~\cite{arXiv2212VNNCOMP2022}. MNIST-FC models were loaded in ONNX
+format, converted to PyTorch via \texttt{onnx2pytorch}, wrapped in
+\texttt{BoundedModule}, and automatically sharded---without any manual
+intervention. The function traverses the \texttt{BoundedModule} graph in
+topological order, locates alternating pairs of \texttt{BoundLinear} nodes, and
+replaces them with \texttt{BoundLinearTP\_Col/Row} with sharded weights; it
+then re-executes the forward pass to update graph metadata and marks sharded
+zones for correct intermediate bound computation.
+
+All three VNN-COMP models (256$\times$2, 256$\times$4, 256$\times$6) were
+sharded successfully and passed the soundness check
+(Table~\ref{tab:tp-correctness}), confirming the applicability of the approach
+to arbitrary fully connected ONNX models.
+
+\subsection{Experiment 4: Correctness of FSDP Bounds}
+
+\subsubsection{Methodology}
+
+The methodology mirrors Experiment~2: bounds were computed single-GPU and
+FSDP$=$2 with verification of deviations, cross-rank consistency, and soundness.
+Tests covered MLPs ($h = 256$, depth 2, 4, 6 layers) under IBP and CROWN, plus
+VNN-COMP ONNX models (256$\times$2, 256$\times$4) under CROWN---eight tests in total.
+
+\subsubsection{Results}
+
+\begin{table}[htbp]
+\centering
+\caption{Correctness of FSDP=2 bounds relative to the single-GPU reference.
+$\Delta lb$, $\Delta ub$---maximum absolute deviation from reference bounds.}
+\label{tab:fsdp-correctness}
+\begin{tabular}{llcccc}
+\toprule
+Model & Method & $|\Delta lb|$ & $|\Delta ub|$
+    & Cross-rank & Sound \\
+\midrule
+MLP 256$\times$2 & IBP   & $0.00$ & $0.00$ & $0.00$ & Yes \\
+MLP 256$\times$2 & CROWN & $0.00$ & $0.00$ & $0.00$ & Yes \\
+MLP 256$\times$4 & IBP   & $0.00$ & $0.00$ & $0.00$ & Yes \\
+MLP 256$\times$4 & CROWN & $0.00$ & $0.00$ & $0.00$ & Yes \\
+MLP 256$\times$6 & IBP   & $0.00$ & $0.00$ & $0.00$ & Yes \\
+MLP 256$\times$6 & CROWN & $0.00$ & $0.00$ & $0.00$ & Yes \\
+ONNX 256$\times$2 & CROWN & $0.00$ & $0.00$ & $0.00$ & Yes \\
+ONNX 256$\times$4 & CROWN & $0.00$ & $0.00$ & $0.00$ & Yes \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Analysis}
+
+FSDP yields \textit{bitwise-identical} bounds for all tests: the deviation is
+exactly $0.00$---a true zero, not machine epsilon. This is a fundamental
+distinction from TP (Table~\ref{tab:tp-correctness}), where models with multiple
+zones lose tightness by orders of magnitude.
+
+The reason is that each layer under FSDP receives the full weight matrix via
+\texttt{AllGather} before computation begins, so IBP and CROWN are
+arithmetically identical to the single-GPU case. Sharding affects only weight
+storage, not the operations themselves.
+
+\subsection{Experiment 5: GPU Memory Consumption with FSDP}
+
+\subsubsection{Methodology}
+
+Two metrics were measured. \textit{Baseline memory}---the allocation after
+initialisation and sharding, before \texttt{compute\_bounds} is called;
+reflects the cost of weight storage. \textit{Peak memory}---
+\texttt{max\_memory\_allocated} during \texttt{compute\_bounds}; includes
+weights, CROWN $A$-matrices, intermediate tensors, and NCCL buffers.
+
+Tests covered MLPs with width $h \in \{256, 1024, 4096, 8192\}$ at depth~4,
+and depth $d \in \{2, 4, 6, 8\}$ at width~4096. Verification used CROWN,
+$\varepsilon = 0.02$, input dimension~784 (MNIST). For FSDP$=$2, peak memory
+was taken as the maximum over both ranks.
+
+\subsubsection{Results}
+
+\begin{table}[htbp]
+\centering
+\caption{Baseline memory (weight storage) with FSDP=2 vs.\ single-GPU}
+\label{tab:fsdp-baseline}
+\begin{tabular}{lrrr}
+\toprule
+Model & Single GPU, MB & FSDP, MB & Savings, \% \\
+\midrule
+MLP $h{=}256$, $d{=}4$   &     1.5 &    0.8 & 50 \\
+MLP $h{=}1024$, $d{=}4$  &    15.1 &    7.6 & 50 \\
+MLP $h{=}4096$, $d{=}4$  &   204.5 &  102.3 & 50 \\
+MLP $h{=}8192$, $d{=}4$  &   792.9 &  396.5 & 50 \\
+MLP $h{=}4096$, $d{=}8$  &   460.5 &  230.3 & 50 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\caption{Peak memory (during \texttt{compute\_bounds}) with FSDP=2 vs.\ single-GPU}
+\label{tab:fsdp-peak}
+\begin{tabular}{lrrr}
+\toprule
+Model & Single GPU, MB & FSDP, MB & Savings, \% \\
+\midrule
+MLP $h{=}4096$, $d{=}4$  &   3\,800 &  2\,527 & 34 \\
+MLP $h{=}8192$, $d{=}4$  &  14\,759 &  9\,782 & 34 \\
+MLP $h{=}4096$, $d{=}8$  &  16\,726 & 10\,232 & 39 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Analysis}
+
+Baseline memory is reduced by exactly 50\% for every configuration: each rank
+stores exactly half the rows of every weight tensor, matching the theoretical
+value $1/P = 50\%$ (Section~\ref{sec:fsdp-memory-theory}).
+
+Peak memory decreases by only 17--39\%, because FSDP shards only weights while
+CROWN $A$-matrices always have full dimension $O(h \times h)$ on each GPU.
+At $d = 4$ layers, $A$-matrices are comparable in size to weights, so sharding
+weights alone yields ${\sim}34\%$; at $d = 8$, the weight fraction is higher
+and savings reach 39\%. For shallow models ($d = 2$) peak savings are minimal
+since $A$-matrices dominate.
+
+For comparison, TP (Exp.~1) achieves ${\sim}2\times$ peak memory reduction by
+sharding both weights and $A$-matrices, at the cost of bound degradation.
+FSDP offers moderate savings with perfect bound accuracy---critical for complete
+verification.
+
+\subsection{Experiment 6: FSDP in Complete Verification (BaB)}
+\label{sec:exp6}
+
+\subsubsection{Motivation and Methodology Correction}
+
+Complete verification ($\beta$-CROWN~\cite{betaCROWN2021} + BaB) differs
+substantially from incomplete verification: it iteratively splits the input
+domain into sub-problems, optimises $\alpha$- and $\beta$-parameters for each
+sub-problem, and stores the branching-tree history in GPU memory. The primary
+memory consumers here are \textit{alpha tensors}---per-neuron ReLU approximation
+slopes $\alpha_{i,k} \in [0, 1]$, with dimensionality
+$(\text{layers}) \times (\text{specifications}) \times (\text{batch}) \times
+(\text{neurons per layer})$.
+
+During the development of a fair comparison, a systematic artefact was discovered:
+the single-GPU mode used \texttt{auto\_enlarge\_batch\_size} (automatically
+filling the GPU) and \texttt{pruning\_in\_iteration} (early round termination),
+whereas FSDP mode disabled these optimisations for AllGather synchronisation.
+The two modes were thus processing \textit{different workloads}---the apparent
+``27$\times$'' advantage of FSDP in early runs was spurious.
+
+To eliminate the artefact, the option \texttt{bab.force\_synchronous}
+(\texttt{--force\_synchronous}) was implemented, which forces single-GPU mode to
+follow the same BaB code path as FSDP: fixed batch size, no
+\texttt{auto\_enlarge\_batch\_size}, no \texttt{early\_stop}, no
+\texttt{pruning\_in\_iteration}.
+
+\subsubsection{Methodology}
+
+The model \texttt{mnist-net\_256x6} (6 layers of width 256,
+${\sim}1.5$~MB weights) from VNN-COMP~2022 was used with $\varepsilon = 0.05$.
+Parameters: exactly 10 BaB rounds, batch sizes of 512 and 4096, identical for
+single-GPU and FSDP$=$2.
+
+\subsubsection{Results}
+
+\begin{table}[htbp]
+\centering
+\caption{Fair comparison of FSDP$=$2 and single-GPU in BaB on
+\texttt{mnist-net\_256x6}, $\varepsilon{=}0.05$, exactly 10 rounds.
+Workload is identical.}
+\label{tab:fsdp-bab}
+\begin{tabular}{lcccc}
+\toprule
+Configuration & Batch & Domains & Rounds & Peak GPU, MB \\
+\midrule
+Single GPU  &   512 &   6\,236 & 10 &     211.7 \\
+FSDP$=$2    &   512 &   6\,236 & 10 & 215.7 / rank \\
+Single GPU  & 4\,096 &  49\,888 & 10 &   1\,537.3 \\
+FSDP$=$2    & 4\,096 &  49\,888 & 10 & 1\,541.4 / rank \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Analysis}
+
+\texttt{mnist-net\_256x6} has ${\sim}1.5$~MB weights while total peak
+consumption is ${\sim}1.5$~GB: weights constitute less than $0.1\%$; the
+remainder is alpha/beta tensors and sub-domain history. Sharding $1.5$~MB does
+not yield measurable gain; \texttt{AllGather} adds ${\sim}4$~MB overhead.
+
+FSDP does not compromise bound accuracy and does not alter the complete
+verification workload, but it does not save memory on models where weights
+are negligible compared to alpha tensors.
+
+\subsection{Experiment 7: FSDP with ViT from VNN-COMP'23}
+\label{sec:exp7}
+
+\subsubsection{Model and JIT Compatibility}
+
+The model \texttt{pgd\_2\_3\_16} (2 Transformer blocks, 3 heads,
+${\sim}75$K parameters, ${\sim}0.3$~MB weights) from VNN-COMP 2023 was used.
+Unlike MLPs, the Transformer employs dynamic reshape operations that are
+incompatible with the JIT tracing used by \texttt{auto\_LiRPA}.
+
+Three classes of JIT incompatibilities were resolved. In \texttt{BoundReshape},
+the batch dimension is ``baked in'' as a constant during JIT tracing; the fix
+replaces the first axis with the current batch size whenever
+$\prod(\text{new\_shape}) = x.\text{numel}()$---the check prevents incorrect
+replacement for reshapes of the form $[B, N, D] \to [B \cdot N, D]$.
+In \texttt{BoundConcat}, the JIT fixed the number of concatenated tensors.
+In \texttt{BoundConstantOfShape}, the JIT-baked shape is replaced with the
+current shape.
+
+\subsubsection{Results}
+
+\begin{table}[htbp]
+\centering
+\caption{Fair comparison of FSDP$=$2 and single-GPU on ViT
+\texttt{pgd\_2\_3\_16}, VNN-COMP'23}
+\label{tab:fsdp-vit}
+\begin{tabular}{lccc}
+\toprule
+Configuration & Domains & Rounds & Peak GPU, MB \\
+\midrule
+Single GPU & 78 & 10 & 1\,020.1 \\
+FSDP$=$2   & 78 & 10 & 1\,020.1 / rank \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The same pattern as in Experiment~6: weights ($0.3$~MB) are negligible compared
+to attention $A$-matrices (${\sim}1$~GB). The key result is the \textit{correct
+execution} of ViT verification in $\alpha,\beta$-CROWN with FSDP: bounds are
+bitwise identical to single-GPU, and the workload is reproducible.
+
+\subsection{Experiment 8: Extending FSDP to Convolutional Layers}
+\label{sec:exp8}
+
+\subsubsection{Implementation}
+
+The previous experiments covered only fully connected layers. To support
+vision models, FSDP was extended to \texttt{BoundConv}. Convolutional weight
+tensors have shape $[C_\text{out}, C_\text{in}, k_H, k_W]$; sharding is
+performed along dimension~0 (output channels $C_\text{out}$)---the only axis
+along which the layer is linear in the output and along which \texttt{AllGather}
+correctly reconstructs the full tensor.
+
+Changes touched three files: \texttt{fsdp\_utils.py} (added \texttt{BoundConv}
+to the list of shardable types and prevented double-sharding);
+\texttt{backward\_bound.py} (added AllGather/free for \texttt{BoundConv} in
+CROWN backward); and \texttt{interval\_bound.py} (added free hooks after IBP
+propagation).
+
+\subsubsection{Methodology}
+
+ResNets from VNN-COMP~2024 (CIFAR-100) were used:
+\texttt{CIFAR100\_resnet\_medium} and \texttt{CIFAR100\_resnet\_large}.
+Fair conditions: \texttt{force\_synchronous}, batch$=$64, max\_iterations$=$5.
+
+\subsubsection{Results}
+
+\begin{table}[htbp]
+\centering
+\caption{Fair comparison of FSDP$=$2 and single-GPU on CIFAR-100 ResNet
+(VNN-COMP'24), BoundConv sharding}
+\label{tab:fsdp-conv}
+\begin{tabular}{llcccc}
+\toprule
+Model & Config & Domains & Rounds & Peak, MB & $|\Delta lb|$ \\
+\midrule
+ResNet-medium & Single GPU & 130 & 5 &   960 & --- \\
+ResNet-medium & FSDP$=$2   & 130 & 5 &   930 / rank & 0.00 \\
+ResNet-large  & Single GPU & \textbf{unsat}\textsuperscript{$\dagger$} & 0 & 4\,610.6 & --- \\
+ResNet-large  & FSDP$=$2   & \textbf{unsat}\textsuperscript{$\dagger$} & 0 & 4\,641.5 / rank & 0.00 \\
+\bottomrule
+\end{tabular}
+\end{table}
+ResNet-medium: budget exhausted (max\_iterations$=$5), result \emph{unknown}.
+\textsuperscript{$\dagger$}ResNet-large: \textbf{property proved}---$\alpha$-CROWN
+computed min-margin $\ge 0$ without branching (\emph{verified, unsat}).
+
+\subsubsection{Analysis}
+
+Bounds are bitwise identical for both models. For ResNet-large, a complete
+verification result (unsat) was obtained: $\alpha$-CROWN proved the property
+at initialisation without BaB. The agreement of results across both modes
+confirms the correctness of BoundConv sharding.
+
+ResNet-large contains ${\sim}95$~MB of convolutional weights, but alpha tensors
+occupy over $4$~GB---they are not sharded, and each GPU stores the full set of
+per-neuron slopes for the entire batch. The AllGather overhead (${\sim}30$~MB)
+exceeds the savings from sharding $95$~MB of weights at $P=2$. In the
+$\alpha$-CROWN+BaB regime, the memory bottleneck is not weights but alpha
+tensors; sharding them is the next development step.

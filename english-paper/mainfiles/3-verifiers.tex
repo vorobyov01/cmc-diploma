@@ -1,0 +1,121 @@
+%!TEX root = ../graduate-work.tex
+\section{Verification Algorithms and Tools}
+
+\subsection{Hierarchy of Bound-Propagation Methods}
+
+The foundation of modern verifiers is bound propagation---algorithms that compute,
+for each network output, an interval guaranteed to contain the true value for any
+admissible input. Three levels of accuracy and computational cost are distinguished.
+
+\textbf{IBP (Interval Bound Propagation)} propagates intervals $[\mathbf{l}, \mathbf{u}]$
+layer by layer through the network.
+For a linear layer $\mathbf{y} = W\mathbf{x} + \mathbf{b}$:
+$$\mathbf{l}_y = W^+\mathbf{l}_x + W^-\mathbf{u}_x + \mathbf{b}, \quad
+  \mathbf{u}_y = W^+\mathbf{u}_x + W^-\mathbf{l}_x + \mathbf{b},$$
+where $W^+ = \max(W, 0)$ and $W^- = \min(W, 0)$ elementwise.
+The method is cheap ($O(n)$, a single forward pass), but intervals widen
+rapidly with depth due to accumulating over-approximation
+error~\cite{CROWNPaper}.
+
+\textbf{CROWN (Convex Relaxation with Optimised Neurons)} computes bounds via
+a backward pass analogous to backpropagation.
+For a ReLU neuron with pre-activation $x \in [l, u]$, $l < 0 < u$, a linear
+relaxation is constructed:
+$$\lambda_l x + b_l \leq \mathrm{ReLU}(x) \leq \frac{u}{u - l}(x - l),$$
+where $\lambda_l \in [0, 1]$ is fixed heuristically.
+The backward pass links the network output to the input through a chain of
+linear inequalities, yielding substantially tighter bounds than
+IBP~\cite{CROWNPaper}.
+
+\textbf{$\alpha$-CROWN} takes this further: the slopes $\lambda_l$ become
+per-neuron optimisable parameters $\alpha_i$. Gradient descent over $\alpha$
+raises the lower bound (or lowers the upper bound), producing the tightest
+possible bounds without any branching~\cite{AlphaBetaCrownVNNCOMP23}.
+
+\subsubsection{Incomplete and Complete Verification}
+
+IBP, CROWN, and $\alpha$-CROWN are methods for \textit{incomplete verification}.
+They construct an over-approximation of the output set, satisfying
+\textit{soundness}: lower bounds never exceed the true minima, and upper bounds
+are never below the true maxima. When the resulting bounds are tight enough to
+confirm the property, verification succeeds; otherwise the outcome is
+indeterminate. Crucially, no false positive can occur: if the property is
+violated for even one input, the bounds will reflect it.
+
+\textit{Complete verification} guarantees a definitive answer: either the
+property holds, or a counterexample is produced. To achieve this,
+\textit{Branch-and-Bound} (BaB) is applied: when bounds are insufficiently
+tight, the input space is split into sub-regions (e.g.\ by fixing a ReLU state:
+$x \geq 0$ or $x < 0$) and bounds are recomputed for each sub-region. The
+process repeats until an answer is obtained or resources are exhausted.
+
+\subsection{Alpha-Beta-CROWN}
+
+$\alpha,\beta$-CROWN~\cite{AlphaBetaCrownVNNCOMP23}---winner of VNN-COMP
+from 2021 through 2024---combines the above methods into a unified verifier.
+For incomplete verification it uses $\alpha$-CROWN; when that does not yield
+sufficiently tight bounds it falls back to complete verification via BaB.
+
+\textbf{$\beta$-CROWN: complete verification without LP.}
+Traditional BaB-based verifiers (e.g.\ MIPVerify) solve a linear program at
+each leaf of the search tree---this is slow and requires data transfer from GPU
+to CPU. $\beta$-CROWN encodes branching constraints (``neuron $i > 0$'' or
+``neuron $i \leq 0$'') directly into the bound-propagation procedure via
+Lagrangian dual variables ($\beta$). As a result, bound evaluation for
+thousands of branches is performed in parallel on the GPU as a series of
+matrix multiplications, and $\beta$ parameters are optimised jointly with
+$\alpha$ via gradient descent.
+
+\subsubsection{Cutting-Plane Methods}
+
+To strengthen relaxations without full branching, cutting planes from integer
+programming are employed. GCP-CROWN adds linear inequalities that jointly
+constrain multiple neurons, cutting off fractional solutions that are feasible
+in the LP relaxation but infeasible for the actual ReLU network. BICCOS
+(Branch-and-bound Inferred Cuts with COnstraint Strengthening) generates cuts
+from logical implications in the search tree and applies them iteratively to
+tighten bounds at root nodes---enabling problems to be solved that would
+otherwise require prohibitively deep
+branching~\cite{AutoLiRPAPracticeSlides}.
+
+\subsection{Other Verifiers}
+
+\textbf{VeriNet} uses Symbolic Interval Propagation (SIP): instead of linear
+inequalities, CROWN-style dependencies are maintained as symbolic expressions.
+The tool is particularly effective for input splitting---a strategy that works
+well for low-dimensional inputs, as in control tasks (ACAS~Xu)~\cite{IntervalReachabilityAnalysis}.
+
+\textbf{nnenum} (winner of VNN-COMP 2020) dynamically switches between levels
+of set representation precision---from fast but coarse zonotopes to accurate
+but expensive ImageStars---depending on the difficulty of the current
+sub-problem~\cite{NNEnumPaper}.
+
+\textbf{Marabou~2.0} addresses the same problem differently: instead of binary
+search over neuron states, it employs the DeepSoI procedure
+(Sum of Infeasibilities)---a continuous function measuring the total violation
+of ReLU constraints, which can be minimised by gradient
+methods. This transforms the combinatorial search into an optimisation
+problem~\cite{arXiv2401Marabou2}.
+
+\textbf{NeuralSAT} adapts CDCL (Conflict-Driven Clause Learning) from SAT
+solving: upon detecting an infeasible combination of neuron states, it records
+it as a ``nogood'', and entire subtrees are pruned without revisitation in
+subsequent search~\cite{NeuralSATRepo}.
+
+\subsection{The \texorpdfstring{\texttt{auto\_LiRPA}}{auto\_LiRPA} Library}
+
+All experiments in this work are based on
+\texttt{auto\_LiRPA}~\cite{AlphaBetaCrownVNNCOMP23}---the library on which
+$\alpha,\beta$-CROWN is built. Its operating principle: bound-propagation
+operations are described as nodes of a PyTorch computational graph, and the
+library automatically derives the graph for upper and lower bounds of any
+intermediate network node. This enables verification of arbitrary architectures
+(CNN, ResNet, Transformer) without writing specialised
+code~\cite{LiRPAVerifyRepo}.
+
+A critically important feature is \textit{batch BaB}: instead of processing
+branches sequentially, the verifier batches hundreds of thousands of unsolved
+sub-problems and computes bounds for all of them in a single GPU pass.
+This is precisely what makes implementing parallelism in \texttt{auto\_LiRPA}
+non-trivial: any modification must preserve the ability to process batches
+and remain compatible with the PyTorch computational graph.
