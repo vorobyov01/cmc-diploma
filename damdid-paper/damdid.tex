@@ -109,7 +109,7 @@ multi-GPU verification research should aim.
 \begin{enumerate}
 \item A measured account of GPU memory in bound propagation. A per-node trace
   attributes the peak of a CROWN pass, and a batch sweep gives the law
-  $M_\text{peak}(B) \approx 21.0 + 0.373\,B$~MB for $\beta$-CROWN{+}BaB, in
+  $M_\text{peak}(B) \approx 21.3 + 0.372\,B$~MB for $\beta$-CROWN{+}BaB, in
   which weights are $0.13\%$ (Section~\ref{sec:memory}).
 \item \emph{Tensor Parallelism} for \texttt{auto\_LiRPA} via custom
   \texttt{BoundLinearTP\_Col/Row} operators, which shards the specification
@@ -130,12 +130,12 @@ multi-GPU verification research should aim.
   by a \texttt{try/except} (Section~\ref{sec:pitfalls}).
 \item A quantified target for future work: because every batch-scaled term is
   linear in the number of subdomains, splitting the domain axis over $P$ GPUs
-  predicts 45\% and 68\% less memory per GPU at $P{=}2,4$, a projection
+  predicts 45.0\% and 67.5\% less memory per GPU at $P{=}2,4$, a projection
   validated against measurements at $B/P$ (Section~\ref{sec:exp-bab}).
 \end{enumerate}
 
 Our implementation, a fork of \texttt{auto\_LiRPA}\,/\,$\alpha,\beta$-CROWN,
-with all experiment scripts and the raw measurement logs, is publicly
+with all experiment scripts and the collated measurement records, is publicly
 available.\footnote{\url{https://github.com/vorobyov01/damdid-2026-submission}}
 
 \section{Background}
@@ -568,9 +568,10 @@ $h{=}4096$, $d{=}8$ & 460.5 & 230.3 & 0 & 7\,934.0 &10\,181.1 &10\,180.9 & 9\,72
 \end{table}
 
 \begin{table}[t]
-\caption{Bound-propagation time (ms), with the transport cost of each mechanism
-in parentheses: \texttt{AllGather} for FSDP, host-to-device staging for
-offloading. The naive baseline is cheaper than sharding on every configuration.}
+\caption{Bound-propagation time (ms). Parentheses: for FSDP, time inside
+\texttt{AllGather} (ms); for offloading, staged host-to-device volume (MB),
+whose copy time is contained in the total. The naive baseline is cheaper than
+sharding on every configuration.}
 \label{tab:fsdp-time}
 \centering
 \begin{tabular}{lrrrr}
@@ -728,10 +729,11 @@ $\varepsilon$                  & 0.05          & benchmark  & 0.0039 \\
 
 Seed 42 throughout; every memory figure is the mean of three repeats after one
 warm-up and its standard deviation is $0.00$~MB in every configuration, which is
-why the tables carry no error columns. Timing deviations are within $1.2\%$
-except for FSDP=4 at $h{=}1024$, the smallest workload, where collective jitter
-reaches $43\%$. Raw logs and the scripts behind every table are in the
-repository.
+why the tables carry no error columns. Timing deviations are below $5\%$ in
+every configuration at $h \geq 4096$; at $h{=}1024$, where a pass lasts tens of
+milliseconds, jitter reaches $24\%$ (single GPU) and $43\%$ (FSDP=4). The
+scripts behind every table and the collated measurement records
+(\texttt{experiments/analysis/RESULTS.md}) are in the repository.
 
 \section{Related Work}
 \label{sec:related}
@@ -777,14 +779,15 @@ memory by 26--34\% and propagation time by up to $3.2\times$, and is beaten on
 both axes by the naive baseline of staging weights from host memory. We retract
 the 34--39\% peak saving of the submitted version, which came from measuring two
 modes in one process, and we report the ceiling that made such a saving
-impossible in the first place: the weight term is $3$--$10\%$ of the peak.
+impossible in the first place: the weight term is $6$--$11\%$ of the peak, so
+sharding half of it could never return more than a few percent.
 
 The finding we would carry forward is the measurement, not either
 mechanism. In incomplete verification $A$-matrices exceed weights by
 $5.6\times$ at $h{=}4096$; in complete verification peak memory is
 $21.3 + 0.372\,B$~MB in the number of subdomains, of which weights are
 $0.13\%$. Multi-GPU verification should therefore shard the subdomain axis, for
-which we give a validated projection of $45\%$ and $67.5\%$ less memory per GPU
+which we give a validated projection of $45.0\%$ and $67.5\%$ less memory per GPU
 at $P{=}2,4$, and the immediate implementation task is to scatter domains before
 the model state is configured for the full batch. Sharding the specification
 axis without the IBP fallback --- exact intermediate bounds for neurons inside a
@@ -902,9 +905,11 @@ All five addressed. Parallel verification is now cited and discussed
 correctness check in Section~\ref{sec:exp-arch}, stating that no BaB ran and
 that the FSDP peak is the higher of the two. TP soundness under $\alpha$-CROWN
 is measured (Section~\ref{sec:exp-tp2}): $|\Delta lb|_{\max} =
-4.47\times10^{-8}$, sound, bound $8.0\times10^{-4}$ tighter. The two-zone limit
-is now stated in the text and in the conclusion instead of being implied by a
-table. On external baselines: the single-GPU $\alpha,\beta$-CROWN path is the
+4.47\times10^{-8}$, sound, bound $8.0\times10^{-4}$ tighter. The usability limit is now stated
+in the text and in the conclusion instead of being implied by a table --- and
+stated more sharply than the reviewer put it: machine precision holds only for
+zones with no internal activation, and the deviation compounds per zone
+($2.5$ at two zones, $792$ at three, Table~\ref{tab:tp-correctness}). On external baselines: the single-GPU $\alpha,\beta$-CROWN path is the
 VNN-COMP-winning implementation and is the meaningful baseline for a memory
 claim, since no other verifier shards weights across GPUs; we also address the
 naive alternatives raised by Reviewer 2 below.
@@ -919,8 +924,9 @@ is cited, and the ResNet-large result is qualified as a correctness check.
 \subsection*{Reviewer 2}
 
 \noindent\textbf{``Experiments only with $P{=}2$; scalability to more GPUs not
-investigated.''} Addressed: $P{=}4$ throughout, and it is itself a finding that
-FSDP peak memory is unchanged from $P{=}2$ to $P{=}4$ (2\,476.0 vs
+investigated.''} Addressed: $P{=}4$ in every re-measured experiment (the ViT
+and CIFAR-100 correctness checks remain at $P{=}2$), and it is itself a finding
+that FSDP peak memory is unchanged from $P{=}2$ to $P{=}4$ (2\,476.0 vs
 2\,475.9~MB), because the term it shards is not the term that dominates,
 whereas TP continues to scale ($1.97\times \to 3.83\times$).
 
