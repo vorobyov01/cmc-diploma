@@ -788,8 +788,8 @@ $5.6\times$ at $h{=}4096$; in complete verification peak memory is
 $21.3 + 0.372\,B$~MB in the number of subdomains, of which weights are
 $0.13\%$. Multi-GPU verification should therefore shard the subdomain axis, for
 which we give a validated projection of $45.0\%$ and $67.5\%$ less memory per GPU
-at $P{=}2,4$, and the immediate implementation task is to scatter domains before
-the model state is configured for the full batch. Sharding the specification
+at $P{=}2,4$; the scatter itself already runs correctly per rank, and the
+remaining implementation task is the gather of per-rank results. Sharding the specification
 axis without the IBP fallback --- exact intermediate bounds for neurons inside a
 sharded zone --- is the harder and more valuable open problem.
 
