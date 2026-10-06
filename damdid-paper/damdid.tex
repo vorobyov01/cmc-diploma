@@ -77,12 +77,12 @@ benchmarks such as ACAS~Xu state their properties over physical variables
 instead \cite{Demarchi2023SupportingStandardization}. Both networks and
 specifications are exchanged as ONNX and VNN-LIB files \cite{VNNLIBWebsite},
 the formats of the VNN-COMP competition
-\cite{arXiv2212VNNCOMP2022,arXiv2312VNNCOMP2023,arXiv2412VNNCOMP2024}. None of
-this is easy to decide. Verification is NP-complete already with one hidden
-ReLU layer \cite{arXiv2403RobustnessVerification}, $\exists\mathbb{R}$-complete
-for smooth activations \cite{NeurIPS2021ExistsRComplete} and undecidable for
-some recurrent models \cite{IJCAI2018ReachabilityDNN}, so \emph{complete}
-verifiers rely on Branch-and-Bound, with exponential worst-case time, while
+\cite{arXiv2212VNNCOMP2022,arXiv2312VNNCOMP2023,arXiv2412VNNCOMP2024,arXiv2512VNNCOMP2025}.
+None of this is easy to decide. Verification is NP-complete already with one
+hidden ReLU layer \cite{arXiv2403RobustnessVerification}, and for sigmoid and
+tanh activations even its decidability is an open question
+\cite{Isac2023ExpFunction}, so \emph{complete} verifiers rely on
+Branch-and-Bound, with exponential worst-case time, while
 \emph{incomplete} verifiers settle for a polynomial relaxation and may answer
 \emph{unknown}.
 
@@ -90,7 +90,7 @@ verifiers rely on Branch-and-Bound, with exponential worst-case time, while
 
 In practice most verifiers use \emph{bound propagation}. The best known of
 them, $\alpha,\beta$-CROWN \cite{AlphaBetaCrownVNNCOMP23}, won VNN-COMP every
-year from 2021 to 2024. It computes linear bounds on the network output on a
+year from 2021 to 2025. It computes linear bounds on the network output on a
 GPU, and everything it touches has to fit into that GPU's memory. The weights
 of a single hidden layer with $262\,144$ neurons and $4\,096$ inputs already
 take about 4~GB in float32.
@@ -105,7 +105,7 @@ and this is where multi-GPU verification needs to aim.
 \subsubsection{Contributions.}
 \begin{enumerate}
 \item A node-by-node memory trace of a CROWN pass (Section~\ref{sec:memory}).
-  For $\beta$-CROWN{+}BaB a sweep over the batch size gives
+  A batch-size sweep in $\beta$-CROWN{+}BaB gives
   $M_\text{peak}(B) \approx 21.3 + 0.372\,B$~MB, and the weights are $0.13\%$
   of this peak.
 \item A TP version of \texttt{auto\_LiRPA} built on two new operators,
@@ -133,7 +133,7 @@ measurements.\footnote{\url{https://github.com/vorobyov01/damdid-2026-submission
 
 \subsection{Bound-Propagation Methods}
 
-\emph{IBP} \cite{CROWNPaper} propagates intervals layer by layer. For
+\emph{IBP} \cite{Gowal2018IBP} propagates intervals layer by layer. For
 $\mathbf{y} = W\mathbf{x} + \mathbf{b}$ it gives
 $\mathbf{l}_y = W^+\mathbf{l}_x + W^-\mathbf{u}_x + \mathbf{b}$ and
 $\mathbf{u}_y = W^+\mathbf{u}_x + W^-\mathbf{l}_x + \mathbf{b}$, where $W^\pm$
@@ -150,7 +150,7 @@ and composes these relaxations in a backward pass,
 with $\Lambda_i = \mathrm{diag}(\lambda_i)$. The matrix $A$ is linear in the
 original input, so dependencies between variables survive through all layers.
 This is why CROWN is much tighter than IBP. \emph{$\alpha$-CROWN}
-\cite{AlphaBetaCrownVNNCOMP23} makes the slopes free parameters
+\cite{Xu2021FastComplete} makes the slopes free parameters
 $\alpha_i \in [0,1]$, one per neuron, and optimizes them by gradient ascent,
 still without branching.
 
@@ -647,7 +647,7 @@ contains the scripts for every table together with the collated measurements
 \label{sec:related}
 
 \paragraph{Bound propagation.} CROWN \cite{CROWNPaper} introduced the backward
-linear relaxation, $\alpha$-CROWN \cite{AlphaBetaCrownVNNCOMP23} and
+linear relaxation, $\alpha$-CROWN \cite{Xu2021FastComplete} and
 $\beta$-CROWN \cite{betaCROWN2021} added optimizable slopes and dual encoding of
 branching constraints, DeepPoly \cite{DeepPolyAbstractDomain} works in a
 polyhedral abstract domain and OSIP \cite{arXiv2212OSIP} optimizes symbolic
