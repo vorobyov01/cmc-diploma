@@ -30,25 +30,24 @@ Central University, Moscow, Russia\\
 \maketitle
 
 \begin{abstract}
-Formal neural network verification is bounded in practice by GPU memory, and it
-is widely assumed that the weight matrices are what has to be distributed. We
-test that assumption by porting two sharding strategies from large-scale model
-training to \texttt{auto\_LiRPA}\,/\,$\alpha,\beta$-CROWN and by measuring,
-rather than estimating, where the memory goes. \emph{Tensor Parallelism} shards
-the weights together with the CROWN $A$-matrices, i.e.\ the specification axis:
-peak memory falls by $1.97\times$ at $P{=}2$ and $3.83\times$ at $P{=}4$ and
-propagation becomes $1.90\times$ and $3.49\times$ faster. Its bounds are exact
-for the first sharded zone. Later zones fall back to IBP, and the bounds get
-looser with each of them. \emph{Fully Sharded Data Parallelism} shards only the
-weights. Its bounds are bitwise identical to the single-GPU ones, but peak
-memory goes \emph{up} by 26--34\% and propagation takes up to $3.2\times$
-longer, mostly in collectives. Simply staging the weights from host memory is
-better on both counts. A per-node trace shows why: $A$-matrices
-are $5.6\times$ the weights already at $h{=}4096$, and in
-$\beta$-CROWN{+}Branch-and-Bound peak memory is linear in the number of
-subdomains, $21.3 + 0.372\,B$~MB, of which weights are $0.13\%$. Sharding the
-subdomain axis is therefore the direction that pays, and we quantify it: a
-projected 45.0\% and 67.5\% less memory per GPU at $P{=}2$ and $P{=}4$.
+GPU memory limits the size of networks that formal verification can handle, and
+the usual assumption is that the weight matrices are what has to be split across
+GPUs. We tested this assumption in \texttt{auto\_LiRPA}\,/\,$\alpha,\beta$-CROWN.
+We added two sharding methods from large-model training and measured where the
+memory actually goes. \emph{Tensor Parallelism} (TP) splits the weights together
+with the CROWN $A$-matrices. On 2 GPUs it lowered peak memory by $1.97\times$ and
+made propagation $1.90\times$ faster; on 4 GPUs the factors were $3.83\times$ and
+$3.49\times$. Its bounds are exact in the first sharded zone and get looser in
+later zones, which use IBP. \emph{Fully Sharded Data Parallelism} (FSDP) splits
+only the weights. Its bounds match the single-GPU bounds bit for bit, but peak
+memory grew by 26--34\% and propagation took up to $3.2\times$ longer. Copying
+the weights from host memory one layer at a time needed less memory and less
+time than FSDP. A per-node memory trace explains this. At $h{=}4096$ the
+$A$-matrices take $5.6$ times more memory than the weights. In $\beta$-CROWN with
+Branch-and-Bound the peak grows linearly with the number of subdomains $B$, as
+$21.3 + 0.372\,B$~MB, and weights are $0.13\%$ of it. We therefore expect more
+from splitting the subdomains across GPUs, and estimate 45.0\% less memory per
+GPU at $P{=}2$ and 67.5\% at $P{=}4$.
 
 \keywords{Neural network verification \and Tensor parallelism \and
 Fully sharded data parallelism \and Bound propagation \and
@@ -58,123 +57,123 @@ $\alpha,\beta$-CROWN \and GPU memory.}
 \section{Introduction}
 \label{sec:intro}
 
-Neural networks are now used in vehicle control, avionics and medical decision
-support, where a wrong output can cause real harm. Testing is not enough there,
-since each test checks a single input and not the whole set of admissible
-inputs \cite{Guidotti2019Enhancing}. Formal verification proves that a property
-holds for \emph{every} input in a region.
+Neural networks are used in vehicle control and in medical decision support,
+where a wrong output can cause real harm. Testing checks one input at a time
+and cannot rule out a bad input that nobody tried \cite{Guidotti2019Enhancing}.
+Formal verification proves that a property holds for \emph{every} input in a
+region.
 
-A network computes $f: \mathbb{R}^n \to \mathbb{R}^m$, and we want a property
-$\psi(f(\mathbf{x}))$ to hold for every input $\mathbf{x}$ in a set
-$\mathcal{X}$. Solvers search $\mathcal{X}$ for an input that breaks $\psi$.
-They answer SAT with such a counterexample, or UNSAT when none exists and the
-property holds \cite{marzari2025advancingneuralnetworkverification}. Most
-benchmarks check local robustness. Here every $\mathbf{x}$ with
-$\|\mathbf{x}-\mathbf{x}_0\|_p \leq \varepsilon$ around a sample $\mathbf{x}_0$
-of class $c$ must also be classified as $c$
-\cite{DBLP:journals/corr/abs-2002-03339}. Control tasks such
-as ACAS~Xu use specifications over physical variables
-\cite{Demarchi2023SupportingStandardization}. Networks and properties are
-exchanged in ONNX and the VNN-LIB format \cite{VNNLIBWebsite}, which the VNN-COMP
-competition is built on
-\cite{arXiv2212VNNCOMP2022,arXiv2312VNNCOMP2023,arXiv2412VNNCOMP2024}. The
-problem is NP-complete already for one hidden ReLU layer
-\cite{arXiv2403RobustnessVerification}, $\exists\mathbb{R}$-complete for smooth
-activations \cite{NeurIPS2021ExistsRComplete} and undecidable for some recurrent
-networks \cite{IJCAI2018ReachabilityDNN}. A \emph{complete} verifier therefore
-needs Branch-and-Bound, which is exponential in the worst case. An
-\emph{incomplete} one uses a polynomial relaxation instead.
+We use the standard setting. A network is a function
+$f: \mathbb{R}^n \to \mathbb{R}^m$, a specification is a property
+$\psi(f(\mathbf{x}))$ that should hold on an input set $\mathcal{X}$, and a
+solver searches $\mathcal{X}$ for an input that violates $\psi$. When it finds
+one, the answer is SAT and the input is a counterexample; when it proves that
+none exists, the answer is UNSAT
+\cite{marzari2025advancingneuralnetworkverification}. By far the most common
+specification is local robustness, where every $\mathbf{x}$ within
+$\varepsilon$ of a sample $\mathbf{x}_0$ of class $c$, in some $p$-norm, has to
+be classified as $c$ as well \cite{DBLP:journals/corr/abs-2002-03339}. Control
+benchmarks such as ACAS~Xu state their properties over physical variables
+instead \cite{Demarchi2023SupportingStandardization}. Both networks and
+specifications are exchanged as ONNX and VNN-LIB files \cite{VNNLIBWebsite},
+the formats of the VNN-COMP competition
+\cite{arXiv2212VNNCOMP2022,arXiv2312VNNCOMP2023,arXiv2412VNNCOMP2024}. None of
+this is easy to decide. Verification is NP-complete already with one hidden
+ReLU layer \cite{arXiv2403RobustnessVerification}, $\exists\mathbb{R}$-complete
+for smooth activations \cite{NeurIPS2021ExistsRComplete} and undecidable for
+some recurrent models \cite{IJCAI2018ReachabilityDNN}, so \emph{complete}
+verifiers rely on Branch-and-Bound, with exponential worst-case time, while
+\emph{incomplete} verifiers settle for a polynomial relaxation and may answer
+\emph{unknown}.
 
 \subsection{The Memory Bottleneck and the Question We Ask}
 
 In practice most verifiers use \emph{bound propagation}. The best known of
 them, $\alpha,\beta$-CROWN \cite{AlphaBetaCrownVNNCOMP23}, won VNN-COMP every
-year from 2021 to 2024. It runs on a GPU and computes linear bounds on the
-network output. Everything it touches has to fit into the memory of one GPU.
-The weights of a single hidden layer with $262\,144$ neurons and $4\,096$
-inputs already take about 4~GB in float32.
+year from 2021 to 2024. It computes linear bounds on the network output on a
+GPU, and everything it touches has to fit into that GPU's memory. The weights
+of a single hidden layer with $262\,144$ neurons and $4\,096$ inputs already
+take about 4~GB in float32.
 
-Parameter sharding is the reflex borrowed from large-model training, and it
-presupposes that parameters dominate. This paper implements that reflex
-faithfully in a state-of-the-art verifier, measures it, and shows the
-presupposition to be wrong for verification: the memory sits in the tensors
-indexed by the specification and subdomain axes. That is a statement about where
-multi-GPU verification research should aim.
+The obvious remedy is to shard the parameters across GPUs, as the training of
+large models does. This assumes that the parameters are what fills the memory.
+We implemented two such sharding methods in a state-of-the-art verifier and
+measured them, and the assumption turned out to be wrong. In verification the
+memory goes to the tensors indexed by the specification and by the subdomains,
+and this is where multi-GPU verification needs to aim.
 
 \subsubsection{Contributions.}
 \begin{enumerate}
-\item Section~\ref{sec:memory} traces the memory of a CROWN pass node by node.
-  For $\beta$-CROWN{+}BaB a sweep over the batch size fits
-  $M_\text{peak}(B) \approx 21.3 + 0.372\,B$~MB. Weights take only $0.13\%$ of
-  this peak.
-\item Our TP version of \texttt{auto\_LiRPA} uses custom
-  \texttt{BoundLinearTP\_Col/Row} operators
-  (Sections~\ref{sec:tp},~\ref{sec:exp-tp}). With 2 GPUs peak memory is
-  $1.97\times$ lower and propagation $1.90\times$ faster; with 4 GPUs the
-  numbers are $3.83\times$ and $3.49\times$. We also measure how much tightness
-  IBP costs in each zone and check soundness for CROWN and $\alpha$-CROWN.
-\item FSDP took about 100 lines on top of \texttt{auto\_LiRPA}, and the same
-  code handles convolutions and a ViT. Its bounds match the single-GPU ones bit
-  for bit. The problem is memory. At $h{=}4096$ the peak is 27\% higher than on
-  one GPU, and even plain host-memory staging needs less
-  (Sections~\ref{sec:fsdp},~\ref{sec:exp-fsdp}).
-\item We give a target for future work. All batch-dependent terms grow
-  linearly with the number of subdomains, so splitting them over $P$ GPUs
-  should cut memory per GPU by 45.0\% at $P{=}2$ and 67.5\% at $P{=}4$, or fit
-  $P$ times more subdomains per round (Section~\ref{sec:exp-bab}).
+\item A node-by-node memory trace of a CROWN pass (Section~\ref{sec:memory}).
+  For $\beta$-CROWN{+}BaB a sweep over the batch size gives
+  $M_\text{peak}(B) \approx 21.3 + 0.372\,B$~MB, and the weights are $0.13\%$
+  of this peak.
+\item A TP version of \texttt{auto\_LiRPA} built on two new operators,
+  \texttt{BoundLinearTP\_Col/Row} (Sections~\ref{sec:tp},~\ref{sec:exp-tp}).
+  Peak memory drops $1.97\times$ on 2 GPUs and $3.83\times$ on 4, and
+  propagation gets $1.90\times$ and $3.49\times$ faster. We also measure the
+  tightness lost to IBP in each zone and check soundness for CROWN and
+  $\alpha$-CROWN.
+\item An FSDP version in about 100 lines, which also handles convolutions and a
+  ViT (Sections~\ref{sec:fsdp},~\ref{sec:exp-fsdp}). Its bounds match the
+  single-GPU ones bit for bit, but at $h{=}4096$ its peak is 27\% higher than
+  on one GPU. Even copying the weights from host memory needs less.
+\item A target for future work (Section~\ref{sec:exp-bab}). Every
+  batch-dependent term grows linearly with the number of subdomains, so
+  splitting them over $P$ GPUs should cut memory per GPU by 45.0\% at $P{=}2$
+  and 67.5\% at $P{=}4$, or fit $P$ times more subdomains per round.
 \end{enumerate}
 
-Our implementation, a fork of \texttt{auto\_LiRPA}\,/\,$\alpha,\beta$-CROWN,
-with all experiment scripts and the collated measurement records, is publicly
-available.\footnote{\url{https://github.com/vorobyov01/damdid-2026-submission}}
+The code, a fork of \texttt{auto\_LiRPA}\,/\,$\alpha,\beta$-CROWN, is public
+together with the experiment scripts and the raw
+measurements.\footnote{\url{https://github.com/vorobyov01/damdid-2026-submission}}
 
 \section{Background}
 \label{sec:verifiers}
 
 \subsection{Bound-Propagation Methods}
 
-\emph{IBP} \cite{CROWNPaper} propagates intervals layer by layer: for
+\emph{IBP} \cite{CROWNPaper} propagates intervals layer by layer. For
 $\mathbf{y} = W\mathbf{x} + \mathbf{b}$ it gives
 $\mathbf{l}_y = W^+\mathbf{l}_x + W^-\mathbf{u}_x + \mathbf{b}$ and
-$\mathbf{u}_y = W^+\mathbf{u}_x + W^-\mathbf{l}_x + \mathbf{b}$, with $W^\pm$ the
-positive and negative parts of $W$. It is cheap and loses tightness fast with
-depth. \emph{CROWN} \cite{CROWNPaper} instead relaxes each unstable ReLU with
-pre-activation $x \in [l,u]$, $l<0<u$, by
-$\lambda_l x + b_l \leq \mathrm{ReLU}(x) \leq \frac{u}{u-l}(x-l)$ and composes
-the relaxations in a backward pass,
+$\mathbf{u}_y = W^+\mathbf{u}_x + W^-\mathbf{l}_x + \mathbf{b}$, where $W^\pm$
+are the positive and negative parts of $W$. IBP is cheap, but its intervals
+widen quickly with depth. \emph{CROWN} \cite{CROWNPaper} keeps more
+information. It relaxes each unstable ReLU, with pre-activation $x \in [l,u]$,
+$l<0<u$, by $\lambda_l x + b_l \leq \mathrm{ReLU}(x) \leq \frac{u}{u-l}(x-l)$
+and composes these relaxations in a backward pass,
 \begin{equation}
   A = \Lambda_L W_L \cdots \Lambda_1 W_1,\qquad
   \ell \;\leq\; A\mathbf{x} + \mathbf{b} \;\leq\; u,
   \label{eq:crown}
 \end{equation}
-with $\Lambda_i = \mathrm{diag}(\lambda_i)$. Since $A$ is linear in the original
-input, cross-variable dependencies survive across all layers, which is what
-makes CROWN much tighter than IBP. \emph{$\alpha$-CROWN}
-\cite{AlphaBetaCrownVNNCOMP23} turns the fixed slopes into optimisable
-per-neuron parameters $\alpha_i \in [0,1]$ and tightens the bound by gradient
-ascent, without branching.
+with $\Lambda_i = \mathrm{diag}(\lambda_i)$. The matrix $A$ is linear in the
+original input, so dependencies between variables survive through all layers.
+This is why CROWN is much tighter than IBP. \emph{$\alpha$-CROWN}
+\cite{AlphaBetaCrownVNNCOMP23} makes the slopes free parameters
+$\alpha_i \in [0,1]$, one per neuron, and optimizes them by gradient ascent,
+still without branching.
 
-\emph{Complete verification} \cite{betaCROWN2021} adds Branch-and-Bound: when
-the relaxation is too loose the problem is split, e.g.\ by fixing a ReLU to
-$x \geq 0$ or $x < 0$, and bounds are recomputed per subdomain. $\beta$-CROWN
-encodes the split constraints as Lagrangian dual variables $\beta$ inside the
-propagation, so thousands of subdomains are evaluated in one batched GPU pass
-with $\alpha$ and $\beta$ optimised jointly; BICCOS
-\cite{NeurIPS2024BnbCuttingPlanes} strengthens the root bound with cutting
-planes from the search tree, while other complete verifiers replace the search
-itself, by continuous relaxation \cite{arXiv2401Marabou2}, clause learning
-\cite{NeuralSATRepo}, adaptive set representations \cite{NNEnumPaper} or
-mixed-integer encodings \cite{arXiv1711MIPRobustness}.
+\emph{Complete verification} \cite{betaCROWN2021} adds Branch-and-Bound on top
+of this. When the relaxation is too loose, the problem is split, for example by
+fixing one ReLU to $x \geq 0$ or to $x < 0$, and the bounds are recomputed on
+each subdomain. $\beta$-CROWN folds the split constraints into the propagation
+as Lagrangian dual variables $\beta$, so thousands of subdomains can be bounded
+in one batched GPU pass, with $\alpha$ and $\beta$ optimized together. BICCOS
+\cite{NeurIPS2024BnbCuttingPlanes} adds cutting planes from the search tree to
+strengthen the root bound. Other complete verifiers organize the search
+differently, through continuous relaxation \cite{arXiv2401Marabou2}, clause
+learning \cite{NeuralSATRepo}, adaptive set representations \cite{NNEnumPaper}
+or mixed-integer encodings \cite{arXiv1711MIPRobustness}.
 
 \subsection{The \texttt{auto\_LiRPA} Library}
 
 All our work builds on \texttt{auto\_LiRPA} \cite{AutoLiRPARepo}, the library
-under $\alpha,\beta$-CROWN, which expresses bound propagation over a PyTorch
-computational graph and derives bounds for any intermediate node of an arbitrary
-architecture. It supports \emph{batch BaB}: up to hundreds of thousands of open
-subproblems are bounded in a single pass. Any modification must therefore keep
-batched processing intact and stay compatible with the traced graph, which is
-what makes the sharding work non-trivial.
+behind $\alpha,\beta$-CROWN. It runs bound propagation over a traced PyTorch
+graph and can bound any intermediate node of an arbitrary architecture. It also
+supports \emph{batched BaB}, where up to hundreds of thousands of open
+subproblems are bounded in one pass. Our changes had to keep both the batching
+and the traced graph intact, and most of the effort in sharding went into that.
 
 \section{Sharding Bound Propagation}
 \label{sec:method}
@@ -182,102 +181,107 @@ what makes the sharding work non-trivial.
 \subsection{Primitives, and Why Not Pipeline Parallelism}
 \label{sec:primitives}
 
-\emph{Tensor Parallelism} \cite{MegatronLM2020} splits the matrix products
-inside a layer: column-parallel splits $W \in \mathbb{R}^{k \times n}$ along the
-output dimension into $W^{(r)} \in \mathbb{R}^{k \times n/P}$ and each GPU
-computes a partial output from a replicated input, while row-parallel splits
-along the input dimension and sums the partial products, so a Column--Row pair
-costs exactly one \texttt{AllReduce}. \emph{FSDP} \cite{ZeROPaper} shards every
-parameter tensor across $P$ GPUs and an \texttt{AllGather} rebuilds a layer's
-parameter just before it is needed, releasing it just after, so at most one full
-weight is resident. \emph{Pipeline parallelism} \cite{GPipePaper} does not fit
-CROWN: Equation~\ref{eq:crown} traverses \emph{all} layers in one backward pass,
-so a pipeline would ship weight matrices between stages at every step, i.e.\ TP
-with a worse communication pattern. TP and FSDP both run the full pass on every
-GPU and differ in what they shard: TP the computation, FSDP only the storage.
+\emph{Tensor Parallelism} \cite{MegatronLM2020} splits the matrix product
+inside a layer. In a column-parallel layer every GPU holds a slice
+$W^{(r)} \in \mathbb{R}^{k/P \times n}$ of the weight $W \in \mathbb{R}^{k \times n}$,
+cut along the output dimension, and computes its part of the output from the
+full input. In a row-parallel layer the cut goes along the input dimension, each
+GPU multiplies its slice of the input, and the partial products are summed. A
+Column--Row pair therefore needs one \texttt{AllReduce}. \emph{FSDP}
+\cite{ZeROPaper} does not split the computation at all. Each parameter tensor
+is stored in $P$ pieces, one per GPU. Right before a layer runs, an
+\texttt{AllGather} rebuilds the full weight, and the copy is dropped right
+after, so at most one full weight sits on a GPU at a time. We did not try
+\emph{pipeline parallelism} \cite{GPipePaper}. The CROWN backward pass in
+Equation~\ref{eq:crown} runs through all layers, and a pipeline would have to
+ship weight matrices between stages at every step, which is TP with more
+communication. Both TP and FSDP run the whole pass on every GPU. The difference
+is that TP splits the arithmetic and FSDP splits only where the weights are
+stored.
 
 \subsection{Tensor Parallelism}
 \label{sec:tp}
 
-We add two operators, \texttt{BoundLinearTP\_Col} and
-\texttt{BoundLinearTP\_Row}, derived from \texttt{BoundLinear}. Each calls
-\texttt{AllReduce} in \texttt{bound\_backward}. Each also has a custom ONNX
-symbolic method, so JIT tracing builds the graph without running the
-collective; otherwise tracing fails with \texttt{Tried to trace ProcessGroup}.
-The function \texttt{tp\_shard\_bounded\_module} works on any
-\texttt{BoundedModule}, including one loaded from ONNX. It replaces pairs of
-consecutive \texttt{BoundLinear} nodes with their TP versions and shards the
-weights. A BFS pass then marks each Column--Row subgraph as a \emph{sharded
-zone}, so that its intermediate bounds are handled the same way on every rank.
+We added two operators, \texttt{BoundLinearTP\_Col} and
+\texttt{BoundLinearTP\_Row}, as subclasses of \texttt{BoundLinear}. Their
+\texttt{bound\_backward} calls \texttt{AllReduce}. JIT tracing must not run the
+collective, since it then fails with \texttt{Tried to trace ProcessGroup}, so
+both operators also register a custom ONNX symbolic method. The function
+\texttt{tp\_shard\_bounded\_module} takes any \texttt{BoundedModule}, including
+one loaded from ONNX, swaps pairs of consecutive \texttt{BoundLinear} nodes for
+their TP versions and shards the weights. A BFS pass then marks each Column--Row
+subgraph as a \emph{sharded zone}, so that every rank handles its intermediate
+bounds in the same way.
 
-TP shards $W$ and the $A$-matrices alike, so the backward step
-$A \leftarrow A \cdot \Lambda_i W_i$ stays local inside a zone, and one
-\texttt{AllReduce} at the Row layer restores the exact result. The ReLU between
-the Column and the Row layer needs bounds on the Column outputs to pick its
-slopes $\lambda_i$. Computing them by CROWN would need a separate backward pass
-with communication at every step, which would give the memory back, so each
-rank bounds its own Column outputs by IBP. In the first zone this costs nothing:
-the Column layer is a single affine map of the input box, and IBP is exact
-there. In every later zone the Column input is already an interval, and IBP
-discards the correlation between its components. This is the \emph{wrapping
-effect} \cite{moore2009interval}.
+Since TP shards both $W$ and the $A$-matrices, the backward step
+$A \leftarrow A \cdot \Lambda_i W_i$ is local inside a zone, and one
+\texttt{AllReduce} at the Row layer gives the exact result. The difficulty is the
+ReLU between the Column and the Row layer. To choose its slopes $\lambda_i$,
+CROWN needs bounds on the Column outputs. Computing them with CROWN would take
+another backward pass with communication at every step and would cost the memory
+we just saved. Each rank therefore bounds its own Column outputs with IBP. For
+the first zone this changes nothing, because the Column layer is one affine map
+of the input box and IBP gives the exact interval there. In later zones the
+input of the Column layer is already an interval, and IBP loses the correlation
+between its components. This is known as the \emph{wrapping effect}
+\cite{moore2009interval}.
 
-\paragraph{How fast tightness degrades.} Let IBP pass through
-$k$ linear layers with ReLUs in between, and let $w(\cdot)$ denote
-elementwise interval width. A linear layer maps widths by
-$w(W\mathbf{x}) \leq |W|\,w(\mathbf{x})$ componentwise, and ReLU is
-non-expansive, $w(\mathrm{ReLU}(x)) \leq w(x)$. Composing gives
+\paragraph{How fast tightness degrades.} Suppose IBP passes through $k$
+linear layers with ReLUs between them, and write $w(\cdot)$ for the elementwise
+width of an interval. A linear layer satisfies
+$w(W\mathbf{x}) \leq |W|\,w(\mathbf{x})$ componentwise, and a ReLU never widens
+an interval, $w(\mathrm{ReLU}(x)) \leq w(x)$. Chaining the layers gives
 \begin{equation}
   \|w_\text{out}\|_\infty \;\leq\;
   \Bigl(\textstyle\prod_{i=1}^{k}\bigl\||W_i|\bigr\|_\infty\Bigr)\,
   \|w_\text{in}\|_\infty .
   \label{eq:wrapping}
 \end{equation}
-This is an upper bound on \emph{IBP} widths, not a growth rate of the
-CROWN--IBP gap, and it is the only claim we make: the gap is governed by the
-product of layer norms, so it compounds per zone. The measured behaviour
-(Table~\ref{tab:tp-correctness}) is consistent with it, and $\|\,|W|\,\|_\infty$
-for the three MNIST-FC models is $19.6$, $20.4$ and $21.1$. The mechanism is
-elementary: for $x_1, x_2 \in [-1,1]$ and
-$W = \bigl(\begin{smallmatrix}1&1\\1&-1\end{smallmatrix}\bigr)$, CROWN gives
-$y_1+y_2 = 2x_1 \in [-2,2]$ exactly, while IBP treats $y_1, y_2 \in [-2,2]$ as
-independent and returns $[-4,4]$.
+We use the inequality only as a guide. It bounds the IBP widths from above and
+says nothing precise about the gap between CROWN and IBP, but it shows that the
+gap grows with the product of the layer norms, one factor per zone, and
+Table~\ref{tab:tp-correctness} behaves that way. For the three MNIST-FC models
+$\|\,|W|\,\|_\infty$ is $19.6$, $20.4$ and $21.1$. In two variables the loss is
+easy to see. Take $x_1, x_2 \in [-1,1]$ and
+$W = \bigl(\begin{smallmatrix}1&1\\1&-1\end{smallmatrix}\bigr)$. CROWN knows
+that $y_1+y_2 = 2x_1 \in [-2,2]$; IBP treats $y_1$ and $y_2$ as independent
+intervals $[-2,2]$ and returns $[-4,4]$.
 
 \subsection{Fully Sharded Data Parallelism}
 \label{sec:fsdp}
 
-\texttt{fsdp\_shard\_bounded\_module} replaces every \texttt{BoundParams}
-weight with its shard along \texttt{dim=0}. For \texttt{BoundLinear} the shard
-is $W^{(r)} \in \mathbb{R}^{k/P \times n}$, and for \texttt{BoundConv} it is
-$W^{(r)} \in \mathbb{R}^{C_\text{out}/P \times C_\text{in} \times k_H \times k_W}$. In both layer types dimension~0 is the output axis, so
-an \texttt{AllGather} along it gives back the exact matrix. A tensor stays
-unsharded if its first dimension is not divisible by $P$; at $P{=}4$ this
-happens only for the classifier layer. Two hooks, \texttt{fsdp\_gather\_node}
-and \texttt{fsdp\_free\_node}, run inside \texttt{backward\_general} (CROWN) and
-\texttt{IBP\_general} (IBP). They build the full matrix right before a layer
-needs it and free it right after. The code is about 100 lines, against about
-500 for TP, because it needs no new operators and leaves the graph as it is.
+\texttt{fsdp\_shard\_bounded\_module} keeps on each GPU only its part of every
+\texttt{BoundParams} weight, cut along \texttt{dim=0}. A \texttt{BoundLinear}
+weight becomes $W^{(r)} \in \mathbb{R}^{k/P \times n}$, and a \texttt{BoundConv}
+weight becomes
+$W^{(r)} \in \mathbb{R}^{C_\text{out}/P \times C_\text{in} \times k_H \times k_W}$.
+Dimension~0 is the output axis in both cases, so an \texttt{AllGather} along it
+restores the exact matrix. If the first dimension is not divisible by $P$, we
+leave the tensor whole. At $P{=}4$ this happens only for the classifier. The
+hooks \texttt{fsdp\_gather\_node} and \texttt{fsdp\_free\_node} sit in
+\texttt{backward\_general} (CROWN) and \texttt{IBP\_general} (IBP). They gather a
+weight right before its layer runs and free it right after. The whole change is
+about 100 lines of code, against about 500 for TP, which needed new operators
+and changes to the graph.
 
-FSDP performs the same floating-point operations in the same order as the
-single-GPU path; only the provenance of the weight tensor differs. IBP and CROWN
-bounds are therefore \emph{bitwise} identical --- an exact zero, not a machine
-epsilon --- which we confirm on eight configurations (MLPs of width 256 at
-depths 2, 4, 6 under IBP and CROWN, and ONNX 256$\times$2 and 256$\times$4
-under CROWN) at $P{=}2$ and $P{=}4$. We report it as a regression guarantee
-rather than as a result, since it follows from the construction.
+FSDP does the same floating-point operations in the same order as the
+single-GPU code. Only the origin of the weight tensor differs, so IBP and CROWN
+bounds are \emph{bitwise} identical. Section~\ref{sec:exp-fsdp-exact} confirms
+this, and we use it as a regression test.
 
-FSDP also composes with complete verification without extra algorithmic
-machinery: each rank runs an ordinary $\beta$-CROWN{+}BaB iteration once its
-weights have been gathered, and $\beta$ is managed exactly as on one GPU.
-Sharding \texttt{BoundConv} over output channels required three files to change
-(\texttt{fsdp\_utils.py} to admit \texttt{BoundConv} and to prevent double
-sharding, \texttt{backward\_bound.py} for the gather/free in the CROWN backward,
-\texttt{interval\_bound.py} for the free after IBP). Transformers needed three
-JIT fixes, because \texttt{auto\_LiRPA} bakes reshape arguments in at batch
-size 1 while BaB later increases the batch: \texttt{BoundReshape} substitutes
-the actual batch size when $\prod(\text{new\_shape}) = x.\text{numel}()$,
-\texttt{BoundConcat} takes its tensor count from the trace, and
-\texttt{BoundConstantOfShape} updates its shape argument.
+Complete verification needs no change to the algorithm. Once its weights are
+gathered, each rank runs an ordinary $\beta$-CROWN{+}BaB iteration, and the
+$\beta$ variables are handled exactly as on one GPU. Convolutions required small
+changes in three files, so that \texttt{fsdp\_utils.py} accepts
+\texttt{BoundConv} and never shards a weight twice,
+\texttt{backward\_bound.py} gathers and frees the conv weights in the CROWN
+backward, and \texttt{interval\_bound.py} frees them after IBP. Transformers
+were harder. During tracing \texttt{auto\_LiRPA} bakes the reshape arguments in
+at batch size 1, while BaB later runs larger batches. We patched three
+operators. \texttt{BoundReshape} inserts the actual batch size whenever
+$\prod(\text{new\_shape}) = x.\text{numel}()$, \texttt{BoundConcat} reads its
+tensor count from the trace, and \texttt{BoundConstantOfShape} updates its
+shape argument.
 
 \section{Where the Memory Actually Is}
 \label{sec:memory}
@@ -308,18 +312,19 @@ That gives $c{=}9$ and $1152$~MB of $A$-matrices next to $204.5$~MB of weights.
 With more inputs or a wider output specification the $A$-matrices grow further,
 while the weights stay the same.
 
-Equation~\ref{eq:peak} gives a ceiling for FSDP. Sharding turns $S_W$ into
-$S_W/P$ and does not touch the other terms, so no implementation can save more
-than
+Equation~\ref{eq:peak} also puts a ceiling on what FSDP can save. Sharding
+replaces $S_W$ by $S_W/P$ and leaves the other terms alone, so no implementation
+can save more than
 \begin{equation}
   \eta_\text{max} \;=\; \Bigl(1 - \tfrac{1}{P}\Bigr)\,
   \frac{S_W}{M_\text{peak}} .
   \label{eq:ceiling}
 \end{equation}
 For our MLPs $\eta_\text{max}$ is $5.3\%$ at $h{=}4096$, $d{=}4$ and $5.2\%$ at
-$h{=}8192$. It drops to $2.9\%$ at $d{=}8$ and rises to $7.9\%$ at $P{=}4$. A
-real implementation also pays for the gathered weight and the NCCL buffers, and
-Section~\ref{sec:exp-fsdp} shows that these costs are larger than the saving.
+$h{=}8192$; it drops to $2.9\%$ at $d{=}8$ and rises to $7.9\%$ at $P{=}4$. A
+real implementation also has to pay for the gathered weight and for the NCCL
+buffers. Section~\ref{sec:exp-fsdp} shows that these cost more than the ceiling
+allows to save.
 
 \paragraph{In complete verification the axis is the subdomain count.}
 In $\beta$-CROWN{+}BaB the largest tensors are indexed by the number $B$ of
@@ -330,7 +335,7 @@ The weights do not depend on $B$. We swept $B$ from 128 to 4096 on
 \texttt{mnist-net\_256x6} (Table~\ref{tab:bab-breakdown}) and fitted a line
 through the six points:
 \begin{equation}
-  M_\text{peak}(B) \;\approx\; 21.3 + 0.372\,B \quad\text{MB},
+  M_\text{peak}(B) \;\approx\; 21.3 + 0.372\,B \quad\text{MB}.
   \label{eq:bab-law}
 \end{equation}
 Each batch-dependent term doubles when $B$ doubles, while the weights stay at
@@ -365,9 +370,9 @@ The model is $f(\mathbf{x}) = W_2\,\mathrm{ReLU}(W_1\mathbf{x} + \mathbf{b}_1) +
 Megatron-LM pattern \cite{MegatronLM2020}; $D{=}4096$, $H{=}131\,072$,
 $N{=}2048$, $\varepsilon{=}0.01$, CROWN; $H$ is chosen so that the single-GPU
 baseline fits in 24~GB. The custom TP operators make JIT tracing much slower,
-but this cost is paid once per model, not once per query, so we time graph
-construction separately. Timed together, TP looks $4.8\times$ slower than the
-baseline, although its propagation is faster.
+but this cost is paid once per model and amortized over all queries, so we time
+graph construction separately. If the two were timed together, TP would look
+$4.8\times$ slower than the baseline even though its propagation is faster.
 
 \begin{table}[t]
 \caption{TP scaling. Peak memory and propagation time both scale close to linearly. Comm is the time inside \texttt{AllReduce}, including graph construction and waiting for the slower rank. The single-GPU peak at $H{=}131\,072$ equals the TP=2 per-rank peak at $H{=}262\,144$ measured on the A40, so the TP memory model is exact.}
@@ -385,11 +390,12 @@ TP=4   &  3\,528.4 & $3.83\times$ & 11\,392.1 & 156.5 & $3.49\times$ & 139.9 \\
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:tp-scaling} is the strongest positive result in this paper. The
-model has a single zone fed directly by the input box, so the IBP fallback of
-Section~\ref{sec:tp} is exact here. We measure tightness on smaller models of
-the same structure in Section~\ref{sec:exp-tp2}, where one zone agrees with the
-single-GPU bounds to machine precision.
+Table~\ref{tab:tp-scaling} is the best result we have. Memory and time both
+scale almost linearly with the number of GPUs. The model has a single zone, fed
+directly by the input box, so the IBP fallback of Section~\ref{sec:tp} is exact
+here. Section~\ref{sec:exp-tp2} measures tightness on smaller models of
+identical structure, and there too a single zone agrees with the single-GPU
+bounds to machine precision.
 
 \subsection{Tensor Parallelism: Soundness and Tightness}
 \label{sec:exp-tp2}
@@ -421,34 +427,33 @@ ONNX 256$\times$6    & 3 & 21.1 & $792$ & $750$ & \checkmark \\
 \end{tabular}
 \end{table}
 
-The same holds for $\alpha$-CROWN. Compared with a single-GPU $\alpha$-CROWN
-run, TP=2 differs by at most $|\Delta lb|_{\max} = 4.47\times10^{-8}$ (mean
-$2.14\times10^{-8}$, relative $3.64\times10^{-7}$), well within the tolerance of
-$10^{-4}$. We applied \texttt{tp\_shard\_bounded\_module} to all three MNIST-FC
-ONNX models without manual changes. It walks the graph in topological order,
-replaces the \texttt{BoundLinear} pairs, reruns a forward pass to refresh the
-shapes and marks the zones. All three models pass the checks above.
+$\alpha$-CROWN behaves the same way on a single zone. There TP=2 differs from a
+single-GPU $\alpha$-CROWN run by at most
+$|\Delta lb|_{\max} = 4.47\times10^{-8}$ (mean $2.14\times10^{-8}$, relative
+$3.64\times10^{-7}$), well within the tolerance of $10^{-4}$. We applied
+\texttt{tp\_shard\_bounded\_module} to all three MNIST-FC ONNX models without
+manual changes. It walks the graph in topological order, replaces the
+\texttt{BoundLinear} pairs, reruns a forward pass to refresh the shapes and
+marks the zones. All three models pass the checks above.
 
 \subsection{FSDP: Exactness, and Its Limits}
+\label{sec:exp-fsdp-exact}
 
-On eight configurations (MLPs of width 256 at depths 2, 4, 6 under IBP and
-CROWN; ONNX 256$\times$2 and 256$\times$4 under CROWN) FSDP reproduces the
-single-GPU bounds with $|\Delta lb| = |\Delta ub| = 0.00$, an exact zero, at
-both $P{=}2$ and $P{=}4$. One qualification is due. In the \emph{optimised}
-$\alpha$/$\beta$ path a distributed
-run does not match a plain single-GPU run bit for bit: on
+We checked FSDP on eight configurations: MLPs of width 256 at depths 2, 4 and 6
+under IBP and CROWN, and the ONNX models 256$\times$2 and 256$\times$4 under
+CROWN. In all of them, at both $P{=}2$ and $P{=}4$, FSDP reproduces the
+single-GPU bounds with $|\Delta lb| = |\Delta ub| = 0.00$, an exact zero. There
+is one caveat. In the \emph{optimized} $\alpha$/$\beta$ path, a distributed run
+does not match a plain single-GPU run bit for bit. On
 \texttt{mnist-net\_256x6} at $\varepsilon{=}0.05$, three of nine specification
-bounds differ, by at most $6.10\times10^{-5}$ absolute and
-$1.17\times10^{-7}$ relative. Sharding is not the cause. Our distributed
-launcher disables the TorchScript fusers, a workaround for a strides assertion
-that fires only on non-primary GPUs, and reproducing exactly that fuser
-configuration on a single GPU with no process group at all reproduces the
-distributed bounds digit for digit, while the untouched single-GPU run keeps its
-own values. The deviation is the price of the fuser workaround, not of weight
-sharding, so FSDP is exact in the sense we claimed --- but a distributed run of
-$\alpha,\beta$-CROWN is not bit-identical to a single-GPU one for reasons that
-have nothing to do with sharding, and that is worth knowing for anyone
-comparing multi-GPU verification results.
+bounds differ, by at most $6.10\times10^{-5}$ absolute and $1.17\times10^{-7}$
+relative. Sharding is not the cause. Our distributed launcher turns off the
+TorchScript fusers to avoid a strides assertion that fires only on non-primary
+GPUs. With the same fuser settings, a single GPU without any process group
+gives exactly the distributed bounds, while the default single-GPU run keeps
+its own values. FSDP itself is therefore exact. The small differences come from
+the fuser workaround, and anyone comparing multi-GPU runs of
+$\alpha,\beta$-CROWN with single-GPU runs should expect them.
 
 \subsection{FSDP: Memory and Time}
 \label{sec:exp-fsdp}
@@ -491,46 +496,45 @@ $h{=}4096$, $d{=}8$ & 381.1 & 867.4 (510.8) &1\,003.0 (653.4) & 477.6 (2\,350~MB
 \end{tabular}
 \end{table}
 
-The weight shards are exactly $1/P$ of the weights
-(Table~\ref{tab:fsdp-memory}), but peak memory rises by $26$--$34\%$, and the
-ceiling of Equation~\ref{eq:ceiling} explains why: at
-$h{=}4096$, $d{=}4$ the whole weight term is $10.5\%$ of the peak, so
-$P{=}2$ could have saved at most $5.3\%$ of it, less than the cost of staging a
-full weight. Going from $P{=}2$ to $P{=}4$ moves the peak by $0.1$~MB out of
-$2\,476$ while adding $50$~ms of collectives. These numbers come from our FSDP
-code after two fixes. One removed a second full copy of the weight that every
-gather allocated, which lowered the peak by about $2\%$. The other made the
-gathered weights free after the pass. A shard, however, is still a view of the
-full weight tensor, so the full storage stays allocated.
-Releasing it would lower each FSDP peak by $(1-1/P)\,S_W$, which is less than
-the gap to the single-GPU peak in every row of Table~\ref{tab:fsdp-memory}.
+Table~\ref{tab:fsdp-memory} shows the weight shards at exactly $1/P$ of the
+weights and, at the same time, a peak memory $26$--$34\%$ above the single-GPU
+run. Equation~\ref{eq:ceiling} explains the second number. At $h{=}4096$,
+$d{=}4$ the weights are $10.5\%$ of the peak, so $P{=}2$ could have saved at
+most $5.3\%$, and staging one full weight costs more than that. Going from
+$P{=}2$ to $P{=}4$ changes the peak by $0.1$~MB out of $2\,476$ and adds
+$50$~ms of collectives. These numbers come from our FSDP code after two fixes.
+One removed a second full copy of the weight that every gather allocated, which
+lowered the peak by about $2\%$. The other frees the gathered weights after the
+pass. A shard, however, is still a view of the full weight tensor, so the full
+storage stays allocated. Releasing it would lower each FSDP peak by
+$(1-1/P)\,S_W$, and in every row of Table~\ref{tab:fsdp-memory} that is less
+than the gap to the single-GPU peak.
 
 Propagation is $2.3$--$3.2\times$ slower under FSDP=2 at $h \geq 4096$
 ($1.3\times$ at $h{=}1024$, the smallest workload), and $57$--$70\%$ of the
 wall-clock is spent inside \texttt{AllGather}: $166.7$ of $236.6$~ms at
 $h{=}4096$, $583.5$ of $983.3$~ms at $h{=}8192$. On a PCIe machine without
-NVLink that overhead is structural, since one full weight per layer crosses the
-bus at every intermediate-bound computation --- 19 collectives and $842$~MB
-moved for a $d{=}4$ pass at $h{=}4096$.
+NVLink this overhead cannot be avoided, because one full weight per layer
+crosses the bus at every intermediate-bound computation. A $d{=}4$ pass at
+$h{=}4096$ runs 19 collectives and moves $842$~MB.
 
-\paragraph{The naive baseline is better.} A simpler alternative to sharding is
-to keep the weights in host memory and stage them per layer. We
-implemented this baseline by reusing the same hook sites with a host-to-device
-copy in place of the collective, which leaves \emph{no} weight bytes resident on
-the GPU --- a strictly larger reduction than FSDP's $1/P$ --- and produces bounds
-identical to the single-GPU reference. It wins on both axes: at $h{=}4096$,
-$d{=}4$ it needs $2\,271.6$~MB against FSDP's $2\,476.0$ and $103.3$~ms against
-$236.6$, and the pattern holds at every size (Tables~\ref{tab:fsdp-memory},
-\ref{tab:fsdp-time}). Activation checkpointing, the other naive alternative, does
-not apply at all: the CROWN backward stores no forward activations to recompute,
-and its $A$-matrices are live because they are still needed.
+\paragraph{The naive baseline is better.} A simpler way to get the weights off
+the GPU is to keep them in host memory and copy each one over when its layer
+runs. We built this baseline on the same hooks, with a host-to-device copy in
+place of the collective. It leaves no weight bytes on the GPU at all, so it
+removes more than the $(1-1/P)$ that FSDP can, and its bounds equal the
+single-GPU reference. It also wins on time. At $h{=}4096$, $d{=}4$ it needs
+$2\,271.6$~MB and $103.3$~ms, against $2\,476.0$~MB and $236.6$~ms for FSDP,
+and the picture is the same at every size (Tables~\ref{tab:fsdp-memory}
+and~\ref{tab:fsdp-time}). Activation checkpointing, the other standard trick,
+does not apply. The CROWN backward has no forward activations to recompute, and
+its $A$-matrices are live because later steps still need them.
 
-That the crude mechanism beats the sophisticated one is the clearest statement of
-this paper's finding. Neither mechanism can win, because both pay to stage a full
-weight into a pass whose peak is set by tensors they never touch: at $h{=}4096$
-the staged copies that \texttt{auto\_LiRPA} retains past the layer that needs
-them cost $531$~MB, more than twice the $204.5$~MB of weights either mechanism
-removes.
+Neither the baseline nor FSDP gets below the single-GPU peak, and the reason is
+the same for both. Each brings a full weight into a pass whose peak is set by
+tensors it never touches. At $h{=}4096$ the copies that \texttt{auto\_LiRPA}
+keeps alive after the layer that used them take $531$~MB, more than twice the
+$204.5$~MB of weights that either mechanism removes.
 
 \subsection{Complete Verification: the Memory Is in the Subdomains}
 \label{sec:exp-bab}
@@ -560,57 +564,56 @@ $B$ & $\alpha$ & $\beta$ & Interm.\ bounds & $A$-matrices & Weights & Peak \\
 \end{tabular}
 \end{table}
 
-Two things follow. First, FSDP cannot help here and does not: at $B{=}512$ the
-peak is $211.9$~MB on one GPU and $214.9$~MB per rank at both $P{=}2$ and
-$P{=}4$, because there are $2.03$~MB of weights to shard and the
-\texttt{AllGather} buffers cost more than that.
+FSDP cannot help here, and it does not. At $B{=}512$ the peak is $211.9$~MB on
+one GPU and $214.9$~MB per rank at both $P{=}2$ and $P{=}4$. There are only
+$2.03$~MB of weights to shard, and the \texttt{AllGather} buffers cost more
+than that.
 
-Second, Equation~\ref{eq:bab-law} makes the pay-off of sharding the subdomain
-axis calculable instead of speculative. Splitting a global batch $B$ across $P$
-GPUs leaves each with $B/P$ subdomains and hence
-$21.3 + 0.372\,B/P$~MB, i.e.\ $45.0\%$ less memory per GPU at $P{=}2$ and
-$67.5\%$ less at $P{=}4$ for $B{=}512$ ($49.3\%$ and $73.9\%$ at
-$B{=}4096$). The per-GPU workload of the split is a single-GPU run at $B/P$,
-which Table~\ref{tab:bab-breakdown} measures directly; what the projection
-leaves out is the cost of gathering the per-rank results. Since $B$ is a tunable
-parameter, the law also reads the other way: at the same memory per GPU, $P$
-GPUs bound $P$ times more subdomains per round. This throughput gain is the
-practical pay-off.
+Equation~\ref{eq:bab-law} lets us estimate what splitting the subdomains would
+give. If a global batch $B$ is spread over $P$ GPUs, each holds $B/P$
+subdomains and needs $21.3 + 0.372\,B/P$~MB. For $B{=}512$ that is $45.0\%$
+less memory per GPU at $P{=}2$ and $67.5\%$ less at $P{=}4$ ($49.3\%$ and
+$73.9\%$ at $B{=}4096$). Each GPU then does exactly the work of a single-GPU
+run at $B/P$, which Table~\ref{tab:bab-breakdown} measures directly. The
+estimate leaves out the cost of gathering the per-rank results. Since $B$ is a
+parameter, the same law can be read the other way. At a fixed memory budget per
+GPU, $P$ GPUs bound $P$ times more subdomains in each round, and in practice
+this throughput gain is probably the more useful one.
 
-Our implementation of the split is partial. If the domains are scattered before
-\texttt{build\_history\_and\_set\_bounds}, each rank builds its own state and
-propagates its own chunk correctly. Domain parallelism does not compose with
-FSDP: once ranks hold different subdomains, their per-layer \texttt{AllGather}
-sequences diverge and NCCL deadlocks. We therefore disable weight sharding in
-this mode, which costs nothing here, the weights being $2.03$~MB. The gather of
-the per-rank results still stalls, so we report the projection rather than a
-measurement.
+Our implementation of this split is unfinished. When the domains are scattered
+before \texttt{build\_history\_and\_set\_bounds}, each rank builds its own state
+and bounds its own chunk correctly. Domain parallelism and FSDP do not mix,
+though. Once the ranks hold different subdomains, their sequences of per-layer
+\texttt{AllGather} calls diverge and NCCL deadlocks, so we turn weight sharding
+off in this mode. With $2.03$~MB of weights this costs nothing. The gather of
+the per-rank results still stalls, which is why the numbers above are an
+estimate.
 
 \subsection{Convolutions and Transformers: Correctness Checks}
 \label{sec:exp-arch}
 
-These runs show that the sharding code also works beyond MLPs. We treat them as
-correctness checks only, since memory changes by at most 3\% in either
-direction. On the
-VNN-COMP'23 ViT \texttt{pgd\_2\_3\_16} (2 blocks, 3 heads, $0.3$~MB of weights)
-\cite{arXiv2312VNNCOMP2023}, after the three JIT fixes of
-Section~\ref{sec:fsdp}, FSDP=2 completes 78 BaB domains over 10 rounds at
-$1\,020.1$~MB per rank with $|\Delta lb| = 0.00$ at printed precision --- to our
-knowledge the first Transformer run through BaB in $\alpha,\beta$-CROWN with
-sharded weights. On CIFAR-100 ResNets \cite{arXiv2412VNNCOMP2024} with
-\texttt{BoundConv} sharding (batch 64, \texttt{max\_iterations} 5), ResNet-med
-runs 130 domains over 5 rounds at $930$~MB per rank against $960$~MB on one GPU
-and exhausts its budget (\emph{unknown}), while ResNet-large (${\approx}95$~MB
-of weights) is proved \textbf{unsat} by $\alpha$-CROWN at initialisation at
-$4\,641.5$~MB per rank against $4\,610.6$~MB on one GPU. That \emph{unsat} is a
-correctness check, not a benefit: no BaB ran, and the FSDP peak is the higher of
-the two, its \texttt{AllGather} overhead exceeding what sharding $95$~MB of
-weights returns when the $\alpha$ tensors alone exceed 4~GB.
+The last set of runs checks that the sharding code works beyond MLPs. Memory
+moves by at most 3\% in either direction here, so we read these runs as
+correctness checks and nothing more. The first model is the VNN-COMP'23 ViT
+\texttt{pgd\_2\_3\_16} \cite{arXiv2312VNNCOMP2023}, with 2 blocks, 3 heads and
+$0.3$~MB of weights. After the three JIT fixes of Section~\ref{sec:fsdp},
+FSDP=2 completes 78 BaB domains in 10 rounds at $1\,020.1$~MB per rank, and
+$|\Delta lb| = 0.00$ at printed precision. As far as we know, this is the first
+Transformer that has gone through BaB in $\alpha,\beta$-CROWN with sharded
+weights. The other models are CIFAR-100 ResNets \cite{arXiv2412VNNCOMP2024}
+with \texttt{BoundConv} sharding (batch 64, \texttt{max\_iterations} 5).
+ResNet-med runs 130 domains in 5 rounds at $930$~MB per rank against $960$~MB
+on one GPU and ends with \emph{unknown} when its budget runs out. ResNet-large,
+with about $95$~MB of weights, is proved \emph{unsat} by $\alpha$-CROWN already
+at initialization, at $4\,641.5$~MB per rank against $4\,610.6$~MB on one GPU.
+No BaB ran in that case, and the FSDP peak is the higher of the two. The
+\texttt{AllGather} buffers cost more than sharding $95$~MB of weights saves,
+since the $\alpha$ tensors alone take over 4~GB.
 
 \subsection{Reproducibility}
 
 \begin{table}[t]
-\caption{Optimiser and search settings. All configuration files are in the
+\caption{Optimizer and search settings. All configuration files are in the
 repository; the fair-comparison configs additionally set
 \texttt{force\_synchronous}, \texttt{auto\_enlarge\_batch\_size: false},
 \texttt{pruning\_in\_iteration: false} and \texttt{pgd\_order: skip}.}
@@ -632,67 +635,66 @@ $\varepsilon$                  & 0.05          & benchmark  & 0.0039 \\
 \end{tabular}
 \end{table}
 
-All runs use seed 42. Each memory figure is the mean of three repeats after one
-warm-up. Its standard deviation was $0.00$~MB in every configuration, so the
-tables have no error columns. Timings vary by less than $5\%$ at
-$h \geq 4096$. At $h{=}1024$ a pass takes only tens of milliseconds, and the
-jitter reaches $24\%$ on one GPU and $43\%$ under FSDP=4. The scripts for every
-table and the collated measurements
-(\texttt{experiments/analysis/RESULTS.md}) are in the repository.
+Every run uses seed 42. For memory we report the mean of three repeats after a
+warm-up run; the standard deviation was $0.00$~MB in every configuration, so
+the tables have no error columns. Timings jitter more. Above $h{=}4096$ they
+vary by under $5\%$, but at $h{=}1024$ a pass takes tens of milliseconds, and
+the spread reaches $24\%$ on one GPU and $43\%$ under FSDP=4. The repository
+contains the scripts for every table together with the collated measurements
+(\texttt{experiments/analysis/RESULTS.md}).
 
 \section{Related Work}
 \label{sec:related}
 
 \paragraph{Bound propagation.} CROWN \cite{CROWNPaper} introduced the backward
 linear relaxation, $\alpha$-CROWN \cite{AlphaBetaCrownVNNCOMP23} and
-$\beta$-CROWN \cite{betaCROWN2021} added optimisable slopes and dual encoding of
+$\beta$-CROWN \cite{betaCROWN2021} added optimizable slopes and dual encoding of
 branching constraints, DeepPoly \cite{DeepPolyAbstractDomain} works in a
-polyhedral abstract domain and OSIP \cite{arXiv2212OSIP} optimises symbolic
+polyhedral abstract domain and OSIP \cite{arXiv2212OSIP} optimizes symbolic
 interval propagation.
 
 \paragraph{Parallel and multi-GPU verification.} Earlier parallel verifiers
 follow two lines, and neither deals with the memory of the parameters. The
 first splits the search space. Marabou's Split-and-Conquer
-\cite{Wu2020Parallelization} partitions the input domain across CPU workers
+\cite{Wu2020Parallelization} splits the input domain across CPU workers
 with iterative deepening, and $\beta$-CROWN \cite{betaCROWN2021} batches
 subdomains on one GPU. The second moves a fixed abstract domain to the GPU, as
 GPUPoly \cite{ScalingPolyhedralGPU} does for DeepPoly. Both scale the
 \emph{number} of subproblems, while we looked at the memory of one. Our
 measurements show that this memory sits in the subproblem batch, so splitting
-domains and saving memory turn out to be the same problem.
+domains and saving memory are the same problem.
 
 \paragraph{Sharding for training.} Megatron-LM \cite{MegatronLM2020} introduced
 intra-layer tensor parallelism, ZeRO \cite{ZeROPaper} shards parameters,
-gradients and optimiser states, and GPipe \cite{GPipePaper} pipelines layer
-groups with micro-batches. To our knowledge neither had been applied to
-bound-propagation verification, which is what makes the negative result worth
-recording: a training step is dominated by parameters and optimiser state, a
-verification pass by tensors indexed by specifications and subdomains.
+gradients and optimizer states, and GPipe \cite{GPipePaper} pipelines groups
+of layers with micro-batches. As far as we know, none of them had been tried on
+bound-propagation verification before. The negative result is worth recording
+because the two workloads differ in a basic way. A training step is dominated
+by parameters and optimizer state. A verification pass is dominated by tensors
+indexed by specifications and subdomains.
 
 \section{Conclusion}
 \label{sec:conclusion}
 
-Both sharding schemes were easy to add to $\alpha,\beta$-CROWN, but they
-behave very differently. TP shards the specification axis, so peak memory drops
-by $1.97\times$ on 2 GPUs and $3.83\times$ on 4, and propagation gets
-$1.90\times$ and $3.49\times$ faster. Its bounds stay exact in the first
-sharded zone and loosen in later ones, where IBP is used. FSDP keeps IBP and
-CROWN bounds bitwise identical, yet it adds 26--34\% to peak memory and up to
-$3.2\times$ to propagation time, and staging weights from host memory does
-better on both. The weights are only $6$--$11\%$ of the peak, so
-sharding half of them can save a few percent at most.
+Of the two methods, only TP reduced memory. It splits the $A$-matrices together
+with the weights, so its memory and time scale almost linearly with the number
+of GPUs. Its weak point is tightness, since only the first sharded zone keeps
+exact bounds and the later zones use IBP. FSDP kept the bounds bit-identical,
+but on our MLPs it raised peak memory, and copying the weights from host memory
+did better. This is because in our MLPs the weights are only $6$--$11\%$ of the
+peak. Sharding them can save a few percent at most, which is less than the
+gathered copies cost.
 
-The finding we would carry forward is the measurement, not either
-mechanism. In incomplete verification $A$-matrices exceed weights by
-$5.6\times$ at $h{=}4096$; in complete verification peak memory is
-$21.3 + 0.372\,B$~MB in the number of subdomains, of which weights are
-$0.13\%$. Multi-GPU verification should therefore shard the subdomain axis, for
-which we project $45.0\%$ and $67.5\%$ less memory per GPU at $P{=}2,4$, or $P$
-times more subdomains per round at the same memory. The scatter already runs
-correctly per rank; the remaining task is the gather of per-rank results.
-Sharding the specification
-axis without the IBP fallback --- exact intermediate bounds inside later sharded
-zones --- is the harder and more valuable open problem.
+For us the more useful result is the memory measurement itself. In incomplete
+verification the $A$-matrices take $5.6$ times more memory than the weights at
+$h{=}4096$. In complete verification the peak is $21.3 + 0.372\,B$~MB for $B$
+subdomains, and weights are $0.13\%$ of it. Multi-GPU verification should
+therefore split the subdomains. We estimate $45.0\%$ and $67.5\%$ less memory
+per GPU at $P{=}2$ and $P{=}4$, or $P$ times more subdomains per round at the
+same memory. In our code the scatter of subdomains already works on each rank,
+and the gather of per-rank results is still missing. A harder open problem is
+to shard the specification axis without the IBP fallback, so that the later
+sharded zones also get exact intermediate bounds.
 
 \begin{credits}
 \subsubsection{\ackname}
